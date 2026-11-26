@@ -45,7 +45,8 @@ constexpr QosLutTriplet kIpu4pQosLut[14] = {
 Ipu4pButtress::Ipu4pButtress()
     : bar0_(nullptr),
       refClkTenthsMhz_(192U),
-      wdtCached_(0U) {
+      wdtCached_(0U),
+      wdtCaptured_(false) {
 }
 
 void Ipu4pButtress::init(volatile uint8_t *bar0Base) {
@@ -72,7 +73,11 @@ void Ipu4pButtress::init(volatile uint8_t *bar0Base) {
             break;
     }
 
-    wdtCached_ = mmioRead32(bar0_, kBtrsRegWdt);
+    const uint32_t wdt = mmioRead32(bar0_, kBtrsRegWdt);
+    if (!wdtCaptured_ && wdt != 0xFFFFFFFFU) {
+        wdtCached_ = wdt;
+        wdtCaptured_ = true;
+    }
     const uint32_t fabricCfg10 = mmioRead32(bar0_, kBtrsRegFabricCfg10);
     if (fabricCfg10 != 0xFFFFFFFFU) {
         mmioWrite32(bar0_, kBtrsRegFabricCfg10, fabricCfg10 | kBtrsFabricCfg10EnableBit);
@@ -186,7 +191,25 @@ void Ipu4pButtress::restoreAfterWake() {
     if (!bar0_ || mmioRead32(bar0_, kBtrsRegSecurityCtl) == 0xFFFFFFFFU) {
         return;
     }
-    mmioWrite32(bar0_, kBtrsRegWdt, wdtCached_);
+    const uint32_t ctrl = mmioRead32(bar0_, kBtrsRegCtrl);
+    const uint32_t clkInd = (ctrl & kBtrsCtrlRefClkIndMask) >> 8;
+    switch (clkInd) {
+        case 0U:
+            refClkTenthsMhz_ = 240U;
+            break;
+        case 1U:
+            refClkTenthsMhz_ = 192U;
+            break;
+        case 2U:
+            refClkTenthsMhz_ = 384U;
+            break;
+        default:
+            refClkTenthsMhz_ = 192U;
+            break;
+    }
+    if (wdtCaptured_) {
+        mmioWrite32(bar0_, kBtrsRegWdt, wdtCached_);
+    }
     prepareForPower();
 }
 

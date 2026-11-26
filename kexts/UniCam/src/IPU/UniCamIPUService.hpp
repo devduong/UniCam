@@ -29,6 +29,8 @@ public:
     IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;
 
     static UniCamIPUService *sharedInstance();
+    bool isSleepSuspended() const { return sleepSuspended_; }
+    bool isHardwareStreaming() const { return hal_ != nullptr && hal_->isStreaming(); }
 
     IOReturn getInfo(UniCamIpuHwInfo *outInfo);
     IOReturn getDiagnostics(UniCamIpuDiag *outDiag);
@@ -72,6 +74,8 @@ private:
 
     void onInterrupt(int count);
     void ensurePciD0AndBars();
+    void captureMsiStateIfEnabled();
+    void restoreMsiStateIfNeeded();
     IOReturn ensureRingBufferLocked();
     IOReturn waitNextFrameLocked(uint32_t timeoutMs, UniCamIpuFrameEvent *outEvent);
 
@@ -82,6 +86,11 @@ private:
     uint64_t bar0Phys_;
     uint64_t bar0Len_;
     uint8_t pmCapOff_;
+    uint8_t msiCapOff_;
+    uint16_t savedMsiCtrl_;
+    uint16_t savedMsiData_;
+    uint32_t savedMsiAddrLo_;
+    uint32_t savedMsiAddrHi_;
     uint32_t savedBar0TypeBits_;
     uint32_t bootBar0Lo_;
     uint32_t bootBar0Hi_;
@@ -97,7 +106,7 @@ private:
     IOBufferMemoryDescriptor *ringDesc_;
     UniCamIPUUserClient *activeOwner_;
     uint8_t frameWaitChannel_;
-    bool sleepSuspended_;
+    volatile bool sleepSuspended_;
 };
 
 #endif /* UNICAM_IPU_SERVICE_HPP */

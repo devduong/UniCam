@@ -33,6 +33,8 @@ private:
     void tryAttachServicesAndPublishUvc();
     void updateRegistryStatus();
 
+    bool isHardwareSleepSuspended() const;
+    bool waitForHardwareAwake(uint32_t maxWaitMs) const;
     IOReturn startPipelineLocked(uint32_t shiftedDataTicks = 0U);
     void stopPipelineLocked();
     void stopWorkerThread();
@@ -54,6 +56,7 @@ private:
     bool uvcAttached_ = false;
 
     volatile bool streamingActive_ = false;
+    volatile bool pipelineRunning_ = false;
     volatile bool workerStopRequested_ = false;
     bool workerRunning_ = false;
     thread_t workerThread_ = THREAD_NULL;

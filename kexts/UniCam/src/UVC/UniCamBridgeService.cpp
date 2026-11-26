@@ -231,6 +231,7 @@ void UniCamBridgeService::onUvcStreamingChanged(bool active,
         streamWidth_ = targetW;
         streamHeight_ = targetH;
         streamingActive_ = true;
+        (void)waitForHardwareAwake(3000U);
         if (!workerRunning_) {
             if (stateLock_ != nullptr) {
                 IOLockLock(stateLock_);
@@ -282,6 +283,20 @@ void UniCamBridgeService::onUvcControlUpdated(uint8_t unitOrTerminalId,
     }
 }
 
+bool UniCamBridgeService::isHardwareSleepSuspended() const {
+    return (coreService_ != nullptr && coreService_->isSleepSuspended()) ||
+           (ipuService_ != nullptr && ipuService_->isSleepSuspended());
+}
+
+bool UniCamBridgeService::waitForHardwareAwake(uint32_t maxWaitMs) const {
+    uint32_t waitedMs = 0U;
+    while (!stopping_ && !workerStopRequested_ && isHardwareSleepSuspended() && waitedMs < maxWaitMs) {
+        IOSleep(20);
+        waitedMs += 20U;
+    }
+    return !isHardwareSleepSuspended();
+}
+
 IOReturn UniCamBridgeService::startPipelineLocked(uint32_t shiftedDataTicks) {
     if (coreService_ == nullptr) {
         coreService_ = UniCamCoreService::sharedInstance();
@@ -289,45 +304,85 @@ IOReturn UniCamBridgeService::startPipelineLocked(uint32_t shiftedDataTicks) {
     if (ipuService_ == nullptr) {
         ipuService_ = UniCamIPUService::sharedInstance();
     }
+    if (coreService_ == nullptr || ipuService_ == nullptr || isHardwareSleepSuspended()) {
+        pipelineRunning_ = false;
+        return kIOReturnNotReady;
+    }
 
     UniCamBoardSensorInfo sensorInfo{};
     bool haveSensorInfo = false;
-    if (coreService_ != nullptr) {
-        if (coreService_->getInfo(&sensorInfo) == kIOReturnSuccess) {
-            haveSensorInfo = true;
-            sensorRotation_ = sensorInfo.rotation;
-        }
-        coreService_->setPower(true, false, nullptr);
-        coreService_->setPrivacyLed(true, false, nullptr);
-        coreService_->configureSensor(0, 0);
+    if (coreService_->getInfo(&sensorInfo) == kIOReturnSuccess) {
+        haveSensorInfo = true;
+        sensorRotation_ = sensorInfo.rotation;
     }
 
-    if (ipuService_ != nullptr) {
-        ipuService_->resetIsp3A();
-        UniCamIpuStreamConfig cfg{};
-        cfg.width = (haveSensorInfo && sensorInfo.sensorWidth != 0U) ? sensorInfo.sensorWidth : 1280U;
-        cfg.height = (haveSensorInfo && sensorInfo.sensorHeight != 0U) ? sensorInfo.sensorHeight : 800U;
-        cfg.pixelFormat = kUniCamIpuFormatRaw10Packed;
-        cfg.csiPort = (haveSensorInfo && sensorInfo.csiPort != 0U) ? sensorInfo.csiPort : 6U;
-        cfg.csiLanes = (haveSensorInfo && sensorInfo.csiLanes != 0U) ? sensorInfo.csiLanes : 1U;
-        cfg.vc = 0;
-        cfg.linkFreqHz = (haveSensorInfo && sensorInfo.linkFreqHz != 0ULL) ? sensorInfo.linkFreqHz : 400000000ULL;
-        cfg.shiftedDataTicks = shiftedDataTicks;
-        UniCamIpuStreamStatus st{};
-        IOReturn ipuRet = ipuService_->startStream(&cfg, &st, nullptr);
-        if (ipuRet != kIOReturnSuccess) {
-            IOLog("UniCam: ipu startStream failed 0x%x (will stream diagnostic pattern on timeout)\n",
-                  ipuRet);
+    const IOReturn pwrRet = coreService_->setPower(true, false, nullptr);
+    if (pwrRet != kIOReturnSuccess) {
+        IOLog("UniCam: core setPower(ON) failed 0x%x\n", pwrRet);
+        pipelineRunning_ = false;
+        return pwrRet;
+    }
+
+    (void)coreService_->setPrivacyLed(true, false, nullptr);
+
+    IOReturn cfgRet = coreService_->configureSensor(0, 0);
+    if (cfgRet != kIOReturnSuccess) {
+        IOLog("UniCam: sensor configureSensor failed 0x%x, resetting sensor and retrying\n", cfgRet);
+        IOSleep(25);
+        (void)coreService_->resetSensor(false);
+        cfgRet = coreService_->configureSensor(0, 0);
+        if (cfgRet != kIOReturnSuccess) {
+            IOLog("UniCam: sensor configureSensor retry failed 0x%x\n", cfgRet);
+            coreService_->setPower(false, false, nullptr);
+            if (streamingActive_) {
+                coreService_->setPrivacyLed(true, false, nullptr);
+            }
+            pipelineRunning_ = false;
+            return cfgRet;
         }
     }
 
-    if (coreService_ != nullptr) {
-        coreService_->setStream(true, nullptr);
+    ipuService_->resetIsp3A();
+    UniCamIpuStreamConfig cfg{};
+    cfg.width = (haveSensorInfo && sensorInfo.sensorWidth != 0U) ? sensorInfo.sensorWidth : 1280U;
+    cfg.height = (haveSensorInfo && sensorInfo.sensorHeight != 0U) ? sensorInfo.sensorHeight : 800U;
+    cfg.pixelFormat = kUniCamIpuFormatRaw10Packed;
+    cfg.csiPort = (haveSensorInfo && sensorInfo.csiPort != 0U) ? sensorInfo.csiPort : 6U;
+    cfg.csiLanes = (haveSensorInfo && sensorInfo.csiLanes != 0U) ? sensorInfo.csiLanes : 1U;
+    cfg.vc = 0;
+    cfg.linkFreqHz = (haveSensorInfo && sensorInfo.linkFreqHz != 0ULL) ? sensorInfo.linkFreqHz : 400000000ULL;
+    cfg.shiftedDataTicks = shiftedDataTicks;
+    UniCamIpuStreamStatus st{};
+    const IOReturn ipuRet = ipuService_->startStream(&cfg, &st, nullptr);
+    if (ipuRet != kIOReturnSuccess) {
+        IOLog("UniCam: ipu startStream failed 0x%x (will stream diagnostic pattern on timeout)\n",
+              ipuRet);
+        coreService_->setPower(false, false, nullptr);
+        if (streamingActive_) {
+            coreService_->setPrivacyLed(true, false, nullptr);
+        }
+        pipelineRunning_ = false;
+        return ipuRet;
     }
+
+    const IOReturn streamRet = coreService_->setStream(true, nullptr);
+    if (streamRet != kIOReturnSuccess) {
+        IOLog("UniCam: sensor setStream(ON) failed 0x%x\n", streamRet);
+        ipuService_->stopStream(nullptr);
+        coreService_->setPower(false, false, nullptr);
+        if (streamingActive_) {
+            coreService_->setPrivacyLed(true, false, nullptr);
+        }
+        pipelineRunning_ = false;
+        return streamRet;
+    }
+
+    pipelineRunning_ = true;
     return kIOReturnSuccess;
 }
 
 void UniCamBridgeService::stopPipelineLocked() {
+    pipelineRunning_ = false;
     if (coreService_ != nullptr) {
         coreService_->setStream(false, nullptr);
     }
@@ -365,9 +420,38 @@ void UniCamBridgeService::workerThreadEntry(void *parameter, wait_result_t /*wai
 void UniCamBridgeService::runStreamWorker() {
     uint32_t frameCounter = 0;
     uint32_t consecutiveTimeouts = 0;
+    uint32_t streamHwFrames = 0;
+    uint32_t recoveryAttempts = 0;
     bool triedShiftedTiming = false;
 
     while (!workerStopRequested_ && !stopping_) {
+        if (isHardwareSleepSuspended()) {
+            pipelineRunning_ = false;
+            consecutiveTimeouts = 0;
+            recoveryAttempts = 0;
+            triedShiftedTiming = false;
+            IOSleep(25);
+            continue;
+        }
+
+        if ((!pipelineRunning_ || (ipuService_ != nullptr && !ipuService_->isHardwareStreaming())) &&
+            recoveryAttempts < 4U && stateLock_ != nullptr) {
+            if (recoveryAttempts > 0U) {
+                IOSleep(150);
+                if (workerStopRequested_ || stopping_ || isHardwareSleepSuspended()) {
+                    continue;
+                }
+            }
+            IOLockLock(stateLock_);
+            stopPipelineLocked();
+            const IOReturn recRet = startPipelineLocked(triedShiftedTiming ? 1280U : 0U);
+            IOLockUnlock(stateLock_);
+            recoveryAttempts++;
+            if (recRet == kIOReturnSuccess) {
+                consecutiveTimeouts = 0;
+            }
+        }
+
         uint64_t loopStartAbs = 0;
         uint64_t loopStartNs = 0;
         clock_get_uptime(&loopStartAbs);
@@ -383,7 +467,7 @@ void UniCamBridgeService::runStreamWorker() {
 
         bool haveFrame = false;
         bool inFallback = false;
-        if (ipuService_ != nullptr) {
+        if (ipuService_ != nullptr && pipelineRunning_) {
             UniCamIpuFrameEvent ev{};
             IOReturn waitRet = ipuService_->waitNextFrame(50, &ev);
             if (waitRet == kIOReturnSuccess) {
@@ -402,6 +486,8 @@ void UniCamBridgeService::runStreamWorker() {
                 if (ispRet == kIOReturnSuccess) {
                     haveFrame = true;
                     consecutiveTimeouts = 0;
+                    recoveryAttempts = 0;
+                    streamHwFrames++;
                     hwFramesDelivered_++;
                     if (stats.aeUpdated != 0 && coreService_ != nullptr) {
                         coreService_->setExposureGain(stats.exposureLines,
@@ -411,7 +497,7 @@ void UniCamBridgeService::runStreamWorker() {
                 }
             } else {
                 consecutiveTimeouts++;
-                if (!triedShiftedTiming && hwFramesDelivered_ == 0 && consecutiveTimeouts == 10 &&
+                if (!triedShiftedTiming && streamHwFrames == 0U && consecutiveTimeouts == 10U &&
                     stateLock_ != nullptr) {
                     triedShiftedTiming = true;
                     IOLog("UniCam: no CSI-2 frame after 500ms, retrying with shiftedTicks=1280\n");

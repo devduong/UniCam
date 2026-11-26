@@ -28,6 +28,7 @@ public:
 
     static UniCamCoreService *sharedInstance();
     uint32_t activeBayerOrder() const { return bayerOrder_; }
+    bool isSleepSuspended() const { return sleepSuspended_; }
 
     // Gated operations invoked by UniCamCoreUserClient and in-kernel ISP/UVC consumers
     IOReturn getInfo(UniCamBoardSensorInfo *outInfo);
@@ -66,7 +67,7 @@ private:
     UniCamBoardSensorInfo boardInfo_;
     uint32_t bayerOrder_;
     bool streaming_;
-    bool sleepSuspended_;
+    volatile bool sleepSuspended_;
     UniCamCoreUserClient *activeOwner_;
 };
 

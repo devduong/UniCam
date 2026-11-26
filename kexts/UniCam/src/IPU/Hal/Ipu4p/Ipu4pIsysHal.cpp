@@ -130,8 +130,16 @@ bool Ipu4pIsysHal::init(IOPCIDevice *pciDevice,
 }
 
 void Ipu4pIsysHal::onPciPowerReady() {
-    if (bar0_) {
+    if (!bar0_) {
+        return;
+    }
+    if (initialized_) {
+        buttress_.restoreAfterWake();
+    } else {
         buttress_.init(bar0_);
+    }
+    if (!buttress_.isAuthDone()) {
+        fwAuthenticated_ = false;
     }
 }
 
@@ -736,17 +744,69 @@ IOReturn Ipu4pIsysHal::startStream(const UniCamIpuStreamConfig &cfg,
     if (!initialized_) {
         return kIOReturnNotReady;
     }
-    if (!fwLoaded_) {
+    if (streaming_) {
+        stopStream();
+    }
+    if (!ringDmaBuf_.isValid() || !ringHdr_) {
+        return kIOReturnNotReady;
+    }
+
+    uint32_t hwPort = 0U;
+    if (!Ipu4pCsiPhy::mapFwPortToHwIndex(cfg.csiPort, &hwPort)) {
+        IOLog("UniCamIPU: Unsupported CSI-2 FW port %u\n", cfg.csiPort);
+        return kIOReturnBadArgument;
+    }
+    if (cfg.csiLanes == 0U || cfg.csiLanes > 4U || cfg.width == 0U || cfg.height == 0U) {
+        return kIOReturnBadArgument;
+    }
+
+    const bool packedRaw10 = (cfg.pixelFormat == kUniCamIpuFormatRaw10Packed);
+    const uint32_t rowBytes = packedRaw10 ? ((cfg.width * 10U + 7U) / 8U) : (cfg.width * 2U);
+    const uint32_t stride = alignUp64(rowBytes);
+    const uint32_t payloadBytes = stride * cfg.height;
+    if (payloadBytes + stride > UNICAM_IPU_RING_SLOT_BYTES) {
+        return kIOReturnNoSpace;
+    }
+
+    bool bootedFreshFw = false;
+    if (!fwLoaded_ || !fwAuthenticated_ || !buttress_.isAuthDone() || !isysMmu_.isInitialized()) {
+        if (buttress_.isSecureMode() && !buttress_.isAuthDone()) {
+            fwAuthenticated_ = false;
+        }
         UniCamIpuBootReport autoRep {};
         const IOReturn fwRet = bootEmbeddedFirmware(kUniCamIpuDmaAuto, &autoRep);
         if (fwRet != kIOReturnSuccess) {
+            IOLog("UniCamIPU: On-demand FW boot failed in startStream (ret=0x%x step=%u sec=0x%08x pwr=0x%08x)\n",
+                  fwRet, autoRep.stepFailed, autoRep.securityCtlAfter, autoRep.pwrStateAtFail);
             return fwRet;
         }
+        bootedFreshFw = true;
     }
-    if (!fwAuthenticated_ && !buttress_.isAuthDone()) {
-        return kIOReturnNotReady;
+
+    IOReturn ret = startStreamOnce(cfg, outStatus);
+    if (ret != kIOReturnSuccess && !bootedFreshFw) {
+        IOLog("UniCamIPU: Cached FW stream start failed (0x%x), resetting CSE auth & retrying cold FW boot\n",
+              ret);
+        stopStream();
+        (void)buttress_.resetAuthentication();
+        fwAuthenticated_ = false;
+        freeFirmwareBuffers();
+
+        UniCamIpuBootReport recovRep {};
+        const IOReturn fwRet = bootEmbeddedFirmware(kUniCamIpuDmaAuto, &recovRep);
+        if (fwRet != kIOReturnSuccess) {
+            IOLog("UniCamIPU: Recovery FW boot failed (ret=0x%x step=%u sec=0x%08x pwr=0x%08x)\n",
+                  fwRet, recovRep.stepFailed, recovRep.securityCtlAfter, recovRep.pwrStateAtFail);
+            return fwRet;
+        }
+        ret = startStreamOnce(cfg, outStatus);
     }
-    if (!isysMmu_.isInitialized()) {
+    return ret;
+}
+
+IOReturn Ipu4pIsysHal::startStreamOnce(const UniCamIpuStreamConfig &cfg,
+                                       UniCamIpuStreamStatus *outStatus) {
+    if (!initialized_ || (!fwAuthenticated_ && !buttress_.isAuthDone()) || !isysMmu_.isInitialized()) {
         return kIOReturnNotReady;
     }
     if (streaming_) {
@@ -1244,6 +1304,12 @@ IOReturn Ipu4pIsysHal::handleWake() {
     buttress_.restoreAfterWake();
     if (!buttress_.isAuthDone()) {
         fwAuthenticated_ = false;
+        freeFirmwareBuffers();
+        IOLog("UniCamIPU: S3/D3 wake cleared CSE auth (sec=0x%08x) -> armed on-demand FW re-boot\n",
+              buttress_.readSecurityCtl());
+    } else {
+        buttress_.configureVcMechanism();
+        buttress_.enableIrqs(true);
     }
     return kIOReturnSuccess;
 }

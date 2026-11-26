@@ -52,6 +52,7 @@ private:
     volatile uint8_t *bar0_;
     uint32_t refClkTenthsMhz_;
     uint32_t wdtCached_;
+    bool wdtCaptured_;
 };
 
 } // namespace ipu4p

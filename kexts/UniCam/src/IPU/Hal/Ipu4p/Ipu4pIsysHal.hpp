@@ -88,6 +88,8 @@ private:
                                   uint32_t cpdSize,
                                   uint32_t concreteDmaMode,
                                   UniCamIpuBootReport *outReport);
+    IOReturn startStreamOnce(const UniCamIpuStreamConfig &cfg,
+                             UniCamIpuStreamStatus *outStatus);
     IOReturn powerUpIsysAndOpenSyscom(uint32_t *outStepFailed, UniCamIpuBootReport *outReport = nullptr);
     void powerDownIsysAndCloseSyscom();
     IOReturn sendProxyToken(uint32_t reqId, uint32_t regionIndex, uint32_t value);

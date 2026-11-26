@@ -94,6 +94,11 @@ bool UniCamIPUService::init(OSDictionary *dictionary) {
     bar0Phys_ = 0ULL;
     bar0Len_ = 0ULL;
     pmCapOff_ = 0U;
+    msiCapOff_ = 0U;
+    savedMsiCtrl_ = 0U;
+    savedMsiData_ = 0U;
+    savedMsiAddrLo_ = 0U;
+    savedMsiAddrHi_ = 0U;
     savedBar0TypeBits_ = 0U;
     bootBar0Lo_ = 0U;
     bootBar0Hi_ = 0U;
@@ -161,6 +166,47 @@ IOService *UniCamIPUService::probe(IOService *provider, SInt32 *score) {
     return this;
 }
 
+void UniCamIPUService::captureMsiStateIfEnabled() {
+    if (!pciDevice_ || msiCapOff_ == 0U) {
+        return;
+    }
+    const uint16_t ctrl = pciDevice_->configRead16(static_cast<UInt8>(msiCapOff_ + 2U));
+    const uint32_t addrLo = pciDevice_->configRead32(static_cast<UInt8>(msiCapOff_ + 4U));
+    if ((ctrl & 0x0001U) == 0U || addrLo == 0U || addrLo == 0xFFFFFFFFU) {
+        return;
+    }
+    savedMsiCtrl_ = ctrl;
+    savedMsiAddrLo_ = addrLo;
+    if ((ctrl & 0x0080U) != 0U) {
+        savedMsiAddrHi_ = pciDevice_->configRead32(static_cast<UInt8>(msiCapOff_ + 8U));
+        savedMsiData_ = pciDevice_->configRead16(static_cast<UInt8>(msiCapOff_ + 12U));
+    } else {
+        savedMsiAddrHi_ = 0U;
+        savedMsiData_ = pciDevice_->configRead16(static_cast<UInt8>(msiCapOff_ + 8U));
+    }
+}
+
+void UniCamIPUService::restoreMsiStateIfNeeded() {
+    if (!pciDevice_ || msiCapOff_ == 0U || (savedMsiCtrl_ & 0x0001U) == 0U || savedMsiAddrLo_ == 0U) {
+        return;
+    }
+    const uint16_t ctrl = pciDevice_->configRead16(static_cast<UInt8>(msiCapOff_ + 2U));
+    const uint32_t addrLo = pciDevice_->configRead32(static_cast<UInt8>(msiCapOff_ + 4U));
+    if ((ctrl & 0x0001U) != 0U && addrLo != 0U) {
+        return;
+    }
+    pciDevice_->configWrite32(static_cast<UInt8>(msiCapOff_ + 4U), savedMsiAddrLo_);
+    if ((savedMsiCtrl_ & 0x0080U) != 0U) {
+        pciDevice_->configWrite32(static_cast<UInt8>(msiCapOff_ + 8U), savedMsiAddrHi_);
+        pciDevice_->configWrite16(static_cast<UInt8>(msiCapOff_ + 12U), savedMsiData_);
+    } else {
+        pciDevice_->configWrite16(static_cast<UInt8>(msiCapOff_ + 8U), savedMsiData_);
+    }
+    pciDevice_->configWrite16(static_cast<UInt8>(msiCapOff_ + 2U), savedMsiCtrl_);
+    (void)pciDevice_->configRead16(static_cast<UInt8>(msiCapOff_ + 2U));
+    IOLog("UniCamIPU: Restored MSI capability @0x%02x (ctrl=0x%04x)\n", msiCapOff_, savedMsiCtrl_);
+}
+
 void UniCamIPUService::ensurePciD0AndBars() {
     if (!pciDevice_) {
         return;
@@ -216,6 +262,7 @@ void UniCamIPUService::ensurePciD0AndBars() {
         (void)pciDevice_->configRead16(kIOPCIConfigCommand);
         IODelay(50);
     }
+    restoreMsiStateIfNeeded();
     if (hal_ && bar0Base_) {
         uint32_t sec = ipu4p::mmioRead32(bar0Base_, ipu4p::kBtrsRegSecurityCtl);
         if (sec == 0xFFFFFFFFU && pmCapOff_ != 0) {
@@ -247,6 +294,7 @@ void UniCamIPUService::ensurePciD0AndBars() {
             pciDevice_->configWrite16(kIOPCIConfigCommand, want);
             (void)pciDevice_->configRead16(kIOPCIConfigCommand);
             IODelay(100);
+            restoreMsiStateIfNeeded();
             sec = ipu4p::mmioRead32(bar0Base_, ipu4p::kBtrsRegSecurityCtl);
             IOLog("UniCamIPU: BAR0 recovery after 0xFFFFFFFF -> SEC_CTL=0x%08x\n", sec);
         }
@@ -280,6 +328,10 @@ bool UniCamIPUService::start(IOService *provider) {
     UInt8 pmCap = 0;
     if (pciDevice_->findPCICapability(kIOPCICapabilityIDPowerManagement, &pmCap) != 0) {
         pmCapOff_ = pmCap;
+    }
+    UInt8 msiCap = 0;
+    if (pciDevice_->findPCICapability(kIOPCICapabilityIDMSI, &msiCap) != 0) {
+        msiCapOff_ = msiCap;
     }
     bootBar0Lo_ = pciDevice_->configRead32(kIOPCIConfigBaseAddress0);
     bootBar0Hi_ = pciDevice_->configRead32(kIOPCIConfigBaseAddress1);
@@ -374,6 +426,7 @@ bool UniCamIPUService::start(IOService *provider) {
             irqSource_ = nullptr;
         } else {
             irqSource_->enable();
+            captureMsiStateIfEnabled();
         }
     } else {
         IOLog("UniCamIPU: Interrupt source unavailable (idx=%u), polled mode active\n", msiIrqIndex_);
@@ -472,7 +525,13 @@ void UniCamIPUService::stop(IOService *provider) {
 
 IOReturn UniCamIPUService::setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) {
     (void)whatDevice;
+    if (powerStateOrdinal == kPowerStateOff) {
+        sleepSuspended_ = true;
+    }
     if (!commandGate_) {
+        if (powerStateOrdinal != kPowerStateOff) {
+            sleepSuspended_ = false;
+        }
         return kIOPMAckImplied;
     }
     GatedIpuRequest req = {
@@ -643,6 +702,7 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
         case kOpStartStream: {
             if (self->sleepSuspended_) return kIOReturnNotReady;
             self->ensurePciD0AndBars();
+            self->captureMsiStateIfEnabled();
             IOReturn ret = self->ensureRingBufferLocked();
             if (ret != kIOReturnSuccess) return ret;
             ret = self->hal_->startStream(
@@ -690,6 +750,7 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
 
         case kOpSleep:
             self->sleepSuspended_ = true;
+            self->captureMsiStateIfEnabled();
             self->commandGate_->commandWakeup(&self->frameWaitChannel_, false);
             return self->hal_->handleSleep();
 
