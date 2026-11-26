@@ -1,0 +1,89 @@
+{
+  "sbrg": 4244635648,
+  "iclk": 4256006144,
+  "c1tp": 1,
+  "gpios": [
+    {
+      "index": 0,
+      "group": "GPP_C",
+      "group_id": 2,
+      "pad": 15,
+      "abs_pin": 239,
+      "dw0_addr": 4251584240,
+      "dw0_hex": "0xFD6A06F0",
+      "func": 0,
+      "func_name": "RESET (Camera Sensor Reset - Active Low)",
+      "active_high": 1,
+      "init": 0
+    },
+    {
+      "index": 1,
+      "group": "GPP_A",
+      "group_id": 0,
+      "pad": 21,
+      "abs_pin": 85,
+      "dw0_addr": 4251847024,
+      "dw0_hex": "0xFD6E0970",
+      "func": 11,
+      "func_name": "POWER_ENABLE (Camera LDO / Regulator Enable)",
+      "active_high": 1,
+      "init": 0
+    },
+    {
+      "index": 2,
+      "group": "GPP_H",
+      "group_id": 7,
+      "pad": 20,
+      "abs_pin": 116,
+      "dw0_addr": 4251780928,
+      "dw0_hex": "0xFD6D0740",
+      "func": 12,
+      "func_name": "CLK_ENABLE (External Camera Clock Gate Enable)",
+      "active_high": 1,
+      "init": 0
+    },
+    {
+      "index": 3,
+      "group": "GPP_A",
+      "group_id": 0,
+      "pad": 11,
+      "abs_pin": 75,
+      "dw0_addr": 4251846864,
+      "dw0_hex": "0xFD6E08D0",
+      "func": 13,
+      "func_name": "PRIVACY_LED (White Camera Indicator LED)",
+      "active_high": 1,
+      "init": 0
+    }
+  ],
+  "i2c_bus": 3,
+  "i2c_devs": 5,
+  "i2c_addrs": [
+    {
+      "index": 0,
+      "addr": 54,
+      "addr_hex": "0x36",
+      "type": 0
+    },
+    {
+      "index": 1,
+      "addr": 80,
+      "addr_hex": "0x50",
+      "type": 2
+    },
+    {
+      "index": 2,
+      "addr": 81,
+      "addr_hex": "0x51",
+      "type": 3
+    }
+  ],
+  "mipi_port": 6,
+  "mipi_lanes": 1,
+  "mclk_hz": 19200000,
+  "mclk_src": 1,
+  "mclk_reg": 4256006156,
+  "degree": 0,
+  "cldb_hex": "01010120100a0000000000000000010000000000000000000000000000000000",
+  "ssdb_hex": "01206956398af711a94e9c7d20ee0ab5ca40a3000000000000000000060100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008000a000200000100f82401010000000000000000000000000000000000"
+}

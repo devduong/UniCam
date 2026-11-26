@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "sensor": {
+    "compat": "ovti,ov01a10",
+    "acpi_hid": "OVTI01A0",
+    "vendor": "OmniVision",
+    "model": "OV01A10",
+    "expected_chip_id": "0x560141",
+    "chip_id_reg": "0x300A",
+    "chip_id_width": 3,
+    "i2c_default_addr": "0x36",
+    "cci_addr_bits": 16,
+    "cci_endianness": "big"
+  },
+  "optics_and_bus": {
+    "mclk_hz": 19200000,
+    "sclk_hz": 80000000,
+    "link_freq_hz": 400000000,
+    "mipi_data_rate_mbps": 720,
+    "csi_lanes": 1,
+    "native_width": 1296,
+    "native_height": 816,
+    "active_width": 1280,
+    "active_height": 800,
+    "fps": 30.0,
+    "hts_pixels": 1488,
+    "vts_default": 1792,
+    "vts_min": 896,
+    "vts_max": 65535,
+    "bpp": 10,
+    "bayer_native": "GBRG",
+    "bayer_default_streaming": "SBGGR10"
+  },
+  "controls": {
+    "exposure": {
+      "reg": "0x3501",
+      "width": 2,
+      "min": 4,
+      "max_margin": 8,
+      "default": 1784
+    },
+    "analog_gain": {
+      "reg": "0x3508",
+      "width": 2,
+      "min": 256,
+      "max": 16383,
+      "unity": 256,
+      "default": 256
+    },
+    "digital_gain": {
+      "regs": ["0x350A", "0x3510", "0x3513", "0x3516"],
+      "width": 3,
+      "shift_left": 6,
+      "min": 0,
+      "max": 16383,
+      "default": 1024
+    }
+  },
+  "softisp": {
+    "black_level_10bit": [64, 64, 64, 64],
+    "white_level_10bit": 1023,
+    "demosaic": "malvar_he_cutler_5x5",
+    "ae": {
+      "target_luma": 0.42,
+      "tolerance": 0.03,
+      "dampening": 0.35
+    },
+    "awb_profiles": {
+      "D65": {
+        "r_gain": 1.68,
+        "g_gain": 1.0,
+        "b_gain": 1.54,
+        "ccm": [
+          [ 1.62, -0.48, -0.14],
+          [-0.22,  1.41, -0.19],
+          [-0.04, -0.52,  1.56]
+        ]
+      },
+      "TL84": {
+        "r_gain": 1.48,
+        "g_gain": 1.0,
+        "b_gain": 1.78,
+        "ccm": [
+          [ 1.54, -0.42, -0.12],
+          [-0.20,  1.38, -0.18],
+          [-0.05, -0.56,  1.61]
+        ]
+      },
+      "A": {
+        "r_gain": 1.24,
+        "g_gain": 1.0,
+        "b_gain": 2.18,
+        "ccm": [
+          [ 1.44, -0.34, -0.10],
+          [-0.18,  1.34, -0.16],
+          [-0.06, -0.62,  1.68]
+        ]
+      }
+    }
+  }
+}

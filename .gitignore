@@ -1,0 +1,34 @@
+# OpenCore config backups (may contain SMBIOS serials/MLB/UUID)
+config.plist*
+*.bak
+
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Build artifacts
+build/
+DerivedData/
+kexts/**/build/
+*.o
+*.dSYM/
+
+# Proprietary IPU firmware binaries & Windows driver packages
+firmware/
+kexts/**/firmware/**/*.bin
+*.cab
+*.sys
+*.inf
+kexts/**/MacKernelSDK/
+acpi/output/
+
+# IDE
+.vscode/
+.idea/
+

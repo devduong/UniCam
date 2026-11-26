@@ -1,0 +1,2 @@
+# Intel IPU4P (8086:8a19) Signed Firmware — Package 42.18362.3.16827
+ff2c36cc81a5c726508b22970c2e2538ff06107dc5a72c93401403c227e5157f  cpd_component_signed.bin
