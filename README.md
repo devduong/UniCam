@@ -1,9 +1,11 @@
+> 🌐 **Language / Ngôn ngữ:** **🇬🇧 English** *(Default)* | **[🇻🇳 Tiếng Việt](MD/README.vi.md)**
+
 # UniCam — MIPI CSI-2 Webcam Enabler for Intel Laptops on macOS (OpenCore EFI)
 
 **UniCam** enables integrated MIPI CSI-2 webcams built on **Intel Ice Lake IPU4P (`8086:8a19`)** on macOS using a **100% Pure-EFI Zero-Install** architecture:
 - Everything lives inside your **OpenCore EFI** partition (`EFI/OC/ACPI/` + `EFI/OC/Kexts/`).
 - **Zero** user-space apps, background services, LaunchDaemons, or system extensions installed into macOS.
-- Works natively in **Photo Booth**, **FaceTime**, **QuickTime Player**, and web browsers via Apple's built-in `UVCAssistant`, including automatic **white Privacy LED** control.
+- Works natively in **Photo Booth**, **FaceTime**, **QuickTime Player**, and web browsers via Apple's built-in `UVCAssistant`, including automatic **white Privacy LED** control and clean S3/S0ix **Sleep/Wake** resume.
 - Supports multiple OmniVision sensors (**`OV01A10`**, **`OV01A1B`**, **`OV2740`**, **`OV02C10`**, **`OV5693`**, **`OV5675`**) and both power topologies (**Discrete GPIO `INT346F/INT3472`** and **TI `TPS68470` I2C PMIC `UNIC0002`**).
 
 > [!NOTE]
@@ -17,7 +19,7 @@
 
 | macOS Version | Status | Technical Notes |
 | :--- | :--- | :--- |
-| **macOS 26 Tahoe** *(e.g. `26.7.2`, build `25G332`)* | **Verified Working** | Compiled and tested live with `UVCAssistant` (Photo Booth + Privacy LED). |
+| **macOS 26 Tahoe** *(e.g. `26.7.2`, build `25G332`)* | **Verified Working** | Compiled and tested live with `UVCAssistant` (Photo Booth + Privacy LED + Sleep/Wake). |
 | **macOS 15 Sequoia / 14 Sonoma / 13 Ventura** | **Supported via Single Build** *(needs confirmation)* | Built with `-mmacosx-version-min=13.0` (`LSMinimumSystemVersion = 13.0`). **One single `UniCam.kext`** from [**Releases**](https://github.com/devduong/UniCam/releases) works across all supported versions *(just ensure `Lilu.kext` & `VoodooI2C.kext` match your macOS version)*. |
 | **macOS 12 Monterey and older** *(12 / 11 / 10.15)* | **Not Supported** | Older releases use legacy `VDCAssistant` and lack the `IOUSBHostFamily` / `UVCAssistant` stack of macOS 13+. |
 
@@ -97,7 +99,7 @@ The repository is organized into **2 self-contained folders**, each with a **dou
 
 | Laptop Model | CPU / IPU PCI ID | Power / Clock Topology | Sensor (ACPI HID) | MIPI CSI-2 Link | Status & EFI Profile |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Dell XPS 13 7390 2-in-1** *(2-in-1 convertible model with IPU4P)* | Core 10th Gen Ice Lake<br>**IPU4P `8086:8a19`** | Discrete GPIO (`INT346F`, `C1TP=1`) + PCH `IMGCLKOUT_1` (`19.2 MHz`) + Privacy LED | **OmniVision `OV01A10`**<br>(`OVTI01A0`, `1280x800`) | **Combo PHY Port 6**, `1-lane`, `400 MHz` | **Live Verified** (Photo Booth + Privacy LED). Use [`SSDT-CAM-Dell7390.aml`](acpi/boards/dell-xps-7390-2in1/SSDT-CAM-Dell7390.aml). |
+| **Dell XPS 13 7390 2-in-1** *(2-in-1 convertible model with IPU4P)* | Core 10th Gen Ice Lake<br>**IPU4P `8086:8a19`** | Discrete GPIO (`INT346F`, `C1TP=1`) + PCH `IMGCLKOUT_1` (`19.2 MHz`) + Privacy LED | **OmniVision `OV01A10`**<br>(`OVTI01A0`, `1280x800`) | **Combo PHY Port 6**, `1-lane`, `400 MHz` | **Live Verified** (Photo Booth + Privacy LED + Sleep/Wake). Use [`SSDT-CAM-Dell7390.aml`](acpi/boards/dell-xps-7390-2in1/SSDT-CAM-Dell7390.aml). |
 
 ---
 
@@ -150,4 +152,5 @@ log show --last 5m --predicate 'eventMessage CONTAINS[c] "UniCam"'
 
 - **[`kexts/`](kexts/README.md)** — 100% standalone kext workspace: `Build-UniCam.command` + [`UniCam/`](kexts/UniCam/Makefile) (`src/`, `include/`, `firmware/`, `profiles/sensors/`, `scripts/`).
 - **[`acpi/`](acpi/README.md)** — 100% standalone ACPI workspace: `UniCam-SSDT.command` + `SSDT-CAM-DUMP.aml` + [`scripts/`](acpi/scripts/unicam_ssdt_wizard.py) + [`templates/`](acpi/templates/SSDT-CAM-Static.dsl) + [`boards/`](acpi/boards/dell-xps-7390-2in1/SSDT-CAM-Dell7390.dsl).
+- **[`MD/`](MD/README.vi.md)** — Multi-language documentation ([`README.en.md`](MD/README.en.md), [`README.vi.md`](MD/README.vi.md)).
 - **[`Makefile`](Makefile)** — Top-level build and verification targets (`make clean && make verify`).
