@@ -39,7 +39,7 @@ private:
         bool valid;
     };
 
-    bool mapPhysicalDword(uint64_t physAddr, MappedReg *outReg);
+    bool mapPhysicalDword(uint64_t physAddr, bool isIclk, MappedReg *outReg);
     void unmapReg(MappedReg *reg);
     IOReturn writeGpioPin(uint32_t role, bool sensorOn);
     IOReturn writeMclk(bool enable);

@@ -30,13 +30,17 @@ public:
 
 private:
     void onDiscoveryTimer(IOTimerEventSource *sender);
+    void refreshServicesLocked();
+    void copyActiveServices(UniCamCoreService **outCore, UniCamIPUService **outIpu);
     void tryAttachServicesAndPublishUvc();
     void updateRegistryStatus();
 
-    bool isHardwareSleepSuspended() const;
-    bool waitForHardwareAwake(uint32_t maxWaitMs) const;
+    bool isHardwareSleepSuspendedLocked() const;
+    bool isHardwareSleepSuspended();
+    bool waitForHardwareAwake(uint32_t maxWaitMs);
     IOReturn startPipelineLocked(uint32_t shiftedDataTicks = 0U);
     void stopPipelineLocked();
+    void startWorkerThreadLocked();
     void stopWorkerThread();
     static void workerThreadEntry(void *parameter, wait_result_t waitResult);
     void runStreamWorker();
@@ -44,6 +48,8 @@ private:
     IOWorkLoop *workLoop_ = nullptr;
     IOTimerEventSource *discoveryTimer_ = nullptr;
     IOLock *stateLock_ = nullptr;
+    IOLock *workerLock_ = nullptr;
+    IOLock *streamCtrlLock_ = nullptr;
 
     UniCamCoreService *coreService_ = nullptr;
     UniCamIPUService *ipuService_ = nullptr;
@@ -51,8 +57,10 @@ private:
 
     bool disabledByBootArg_ = false;
     bool debugLog_ = false;
+    bool testMode_ = false;
     bool betaBootArg_ = false;
-    bool stopping_ = false;
+    bool loggedDormant_ = false;
+    volatile bool stopping_ = false;
     bool uvcAttached_ = false;
 
     volatile bool streamingActive_ = false;

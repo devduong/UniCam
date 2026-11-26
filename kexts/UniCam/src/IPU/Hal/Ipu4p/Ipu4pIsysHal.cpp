@@ -10,10 +10,6 @@ namespace ipu4p {
 
 namespace {
 
-uint32_t alignUp64(uint32_t v) {
-    return (v + 63U) & ~63U;
-}
-
 uint64_t currentTimeMs() {
     uint64_t nowNs = 0ULL;
     clock_get_uptime(&nowNs);
@@ -756,15 +752,19 @@ IOReturn Ipu4pIsysHal::startStream(const UniCamIpuStreamConfig &cfg,
         IOLog("UniCamIPU: Unsupported CSI-2 FW port %u\n", cfg.csiPort);
         return kIOReturnBadArgument;
     }
-    if (cfg.csiLanes == 0U || cfg.csiLanes > 4U || cfg.width == 0U || cfg.height == 0U) {
+    if (cfg.csiLanes == 0U || cfg.csiLanes > 4U ||
+        cfg.width == 0U || cfg.height == 0U ||
+        cfg.width > 8192U || cfg.height > 8192U) {
         return kIOReturnBadArgument;
     }
 
     const bool packedRaw10 = (cfg.pixelFormat == kUniCamIpuFormatRaw10Packed);
-    const uint32_t rowBytes = packedRaw10 ? ((cfg.width * 10U + 7U) / 8U) : (cfg.width * 2U);
-    const uint32_t stride = alignUp64(rowBytes);
-    const uint32_t payloadBytes = stride * cfg.height;
-    if (payloadBytes + stride > UNICAM_IPU_RING_SLOT_BYTES) {
+    const uint64_t rowBytes64 = packedRaw10
+        ? ((static_cast<uint64_t>(cfg.width) * 10ULL + 7ULL) / 8ULL)
+        : (static_cast<uint64_t>(cfg.width) * 2ULL);
+    const uint64_t stride64 = (rowBytes64 + 63ULL) & ~63ULL;
+    const uint64_t payloadBytes64 = stride64 * static_cast<uint64_t>(cfg.height);
+    if (payloadBytes64 + stride64 > static_cast<uint64_t>(UNICAM_IPU_RING_SLOT_BYTES)) {
         return kIOReturnNoSpace;
     }
 
@@ -821,7 +821,9 @@ IOReturn Ipu4pIsysHal::startStreamOnce(const UniCamIpuStreamConfig &cfg,
         IOLog("UniCamIPU: Unsupported CSI-2 FW port %u\n", cfg.csiPort);
         return kIOReturnBadArgument;
     }
-    if (cfg.csiLanes == 0U || cfg.csiLanes > 4U || cfg.width == 0U || cfg.height == 0U) {
+    if (cfg.csiLanes == 0U || cfg.csiLanes > 4U ||
+        cfg.width == 0U || cfg.height == 0U ||
+        cfg.width > 8192U || cfg.height > 8192U) {
         return kIOReturnBadArgument;
     }
 
@@ -830,12 +832,16 @@ IOReturn Ipu4pIsysHal::startStreamOnce(const UniCamIpuStreamConfig &cfg,
     fwStreamSource_ = cfg.csiPort;
 
     const bool packedRaw10 = (cfg.pixelFormat == kUniCamIpuFormatRaw10Packed);
-    const uint32_t rowBytes = packedRaw10 ? ((cfg.width * 10U + 7U) / 8U) : (cfg.width * 2U);
-    activeStride_ = alignUp64(rowBytes);
-    activePayloadBytes_ = activeStride_ * cfg.height;
-    if (activePayloadBytes_ + activeStride_ > UNICAM_IPU_RING_SLOT_BYTES) {
+    const uint64_t rowBytes64 = packedRaw10
+        ? ((static_cast<uint64_t>(cfg.width) * 10ULL + 7ULL) / 8ULL)
+        : (static_cast<uint64_t>(cfg.width) * 2ULL);
+    const uint64_t stride64 = (rowBytes64 + 63ULL) & ~63ULL;
+    const uint64_t payloadBytes64 = stride64 * static_cast<uint64_t>(cfg.height);
+    if (payloadBytes64 + stride64 > static_cast<uint64_t>(UNICAM_IPU_RING_SLOT_BYTES)) {
         return kIOReturnNoSpace;
     }
+    activeStride_ = static_cast<uint32_t>(stride64);
+    activePayloadBytes_ = static_cast<uint32_t>(payloadBytes64);
 
     /* Reset queues and counters cleanly before mapping & powering up ISYS. */
     readyHead_ = 0U;

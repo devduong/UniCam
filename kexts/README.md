@@ -21,7 +21,8 @@ This directory contains **everything required for the kernel extension (`UniCam.
 
 ## macOS Support & Required OpenCore EFI Dependencies
 
-- **Supported macOS:** **macOS 13.0 Ventura → macOS 26 Tahoe** (`x86_64`; a single binary build supports all versions thanks to `-mmacosx-version-min=13.0` and stable `IOUSBHostFamily` ABI; verified live on **macOS 26.7.2 Tahoe**, OpenCore **`1.0.9`**). macOS 12 Monterey and older are not supported.
+- **Supported macOS:** **macOS 13.0 Ventura → macOS 26 Tahoe** (`x86_64`; a single binary build supports all versions thanks to `-mmacosx-version-min=13.0` and stable `IOUSBHostFamily` ABI; verified live on **macOS 26.7.2 Tahoe**, OpenCore **`1.0.9`**). Newer kernels (`Darwin >= 26`) require `-unicambeta`; macOS 12 Monterey and older are not supported.
+- **Boot Arguments (`boot-args`):** *(none)* = safe auto-gating on supported IPU4P hardware; `-unicamdbg` = verbose logs + diagnostic fallback UVC when testing new boards; `-unicamtest` = force test-pattern UVC without IPU4P hardware; `-unicambeta` = allow `Darwin >= 26`; `-unicamoff` = disable kext completely.
 - **Required components in `EFI/OC/`** (zero files installed into macOS):
   1. **`EFI/OC/Kexts/Lilu.kext`** (`>= 1.6.7`, recommended `>= 1.7.0`, verified **`1.7.2`**) — first in `Kernel -> Add`.
   2. **`EFI/OC/Kexts/VoodooI2C.kext`** (`>= 2.0`, recommended `>= 2.8+`, verified **`2.9.1`**) with both bundled plugins enabled before it: **`VoodooI2CServices.kext`** (`1.0`) and **`VoodooGPIO.kext`** (`1.1`).

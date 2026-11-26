@@ -3,10 +3,10 @@
 #include "Hal/Ipu4p/Ipu4pRegs.hpp"
 #include "SoftISP/UniCamSoftISP.hpp"
 #include "UniCamIPUUserClient.hpp"
+#include "UniCamKernelGate.h"
 
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSObject.h>
-#include <pexpert/pexpert.h>
 #include <string.h>
 
 extern "C" {
@@ -17,8 +17,6 @@ extern task_t kernel_task;
 OSDefineMetaClassAndStructors(UniCamIPUService, IOService)
 
 namespace {
-
-UniCamIPUService *gSharedIpuInstance = nullptr;
 
 enum {
     kPowerStateOff   = 0,
@@ -46,7 +44,8 @@ enum GatedIpuOp {
     kOpRetainRingDesc,
     kOpClientDisconnect,
     kOpSleep,
-    kOpWake
+    kOpWake,
+    kOpTeardown
 };
 
 struct GatedIpuRequest {
@@ -113,15 +112,39 @@ bool UniCamIPUService::init(OSDictionary *dictionary) {
     ringDesc_ = nullptr;
     activeOwner_ = nullptr;
     frameWaitChannel_ = 0U;
+    pmInitialized_ = false;
+    gateAttached_ = false;
+    stopping_ = false;
+    hwStreaming_ = false;
     sleepSuspended_ = false;
     return true;
 }
 
-UniCamIPUService *UniCamIPUService::sharedInstance() {
-    return gSharedIpuInstance;
+UniCamIPUService *UniCamIPUService::copySharedInstance() {
+    OSDictionary *matching = IOService::serviceMatching("UniCamIPUService");
+    if (!matching) {
+        return nullptr;
+    }
+    IOService *svc = IOService::copyMatchingService(matching);
+    matching->release();
+    if (!svc) {
+        return nullptr;
+    }
+    UniCamIPUService *ipu = OSDynamicCast(UniCamIPUService, svc);
+    if (!ipu || ipu->isInactive() || ipu->stopping_) {
+        svc->release();
+        return nullptr;
+    }
+    return ipu;
 }
 
 void UniCamIPUService::free() {
+    if (gateAttached_ && workLoop_ && commandGate_) {
+        workLoop_->removeEventSource(commandGate_);
+        gateAttached_ = false;
+    }
+    OSSafeReleaseNULL(commandGate_);
+    OSSafeReleaseNULL(workLoop_);
     if (softIsp_) {
         delete softIsp_;
         softIsp_ = nullptr;
@@ -143,9 +166,7 @@ void UniCamIPUService::free() {
 }
 
 IOService *UniCamIPUService::probe(IOService *provider, SInt32 *score) {
-    uint32_t offArg = 0;
-    if (PE_parse_boot_argn("-unicamoff", &offArg, sizeof(offArg))) {
-        IOLog("UniCamIPU: Disabled via -unicamoff boot-arg\n");
+    if (!unicam::isKernelSupportedForLoad("UniCamIPU")) {
         return nullptr;
     }
     if (!super::probe(provider, score)) {
@@ -321,6 +342,7 @@ bool UniCamIPUService::start(IOService *provider) {
     }
 
     PMinit();
+    pmInitialized_ = true;
     provider->joinPMtree(this);
     registerPowerDriver(this, kUniCamIpuPowerStates, kPowerStateCount);
     makeUsable();
@@ -371,7 +393,10 @@ bool UniCamIPUService::start(IOService *provider) {
             bar0FallbackDesc_->release();
             bar0FallbackDesc_ = nullptr;
         }
-        PMstop();
+        if (pmInitialized_) {
+            PMstop();
+            pmInitialized_ = false;
+        }
         pciDevice_->close(this);
         pciDevice_ = nullptr;
         return false;
@@ -389,7 +414,15 @@ bool UniCamIPUService::start(IOService *provider) {
         IOLog("UniCamIPU: Failed to allocate IOWorkLoop\n");
         bar0Map_->release();
         bar0Map_ = nullptr;
-        PMstop();
+        if (bar0FallbackDesc_) {
+            bar0FallbackDesc_->release();
+            bar0FallbackDesc_ = nullptr;
+        }
+        bar0Base_ = nullptr;
+        if (pmInitialized_) {
+            PMstop();
+            pmInitialized_ = false;
+        }
         pciDevice_->close(this);
         pciDevice_ = nullptr;
         return false;
@@ -398,19 +431,24 @@ bool UniCamIPUService::start(IOService *provider) {
     commandGate_ = IOCommandGate::commandGate(this);
     if (!commandGate_ || workLoop_->addEventSource(commandGate_) != kIOReturnSuccess) {
         IOLog("UniCamIPU: Failed to create IOCommandGate\n");
-        if (commandGate_) {
-            commandGate_->release();
-            commandGate_ = nullptr;
-        }
-        workLoop_->release();
-        workLoop_ = nullptr;
+        OSSafeReleaseNULL(commandGate_);
+        OSSafeReleaseNULL(workLoop_);
         bar0Map_->release();
         bar0Map_ = nullptr;
-        PMstop();
+        if (bar0FallbackDesc_) {
+            bar0FallbackDesc_->release();
+            bar0FallbackDesc_ = nullptr;
+        }
+        bar0Base_ = nullptr;
+        if (pmInitialized_) {
+            PMstop();
+            pmInitialized_ = false;
+        }
         pciDevice_->close(this);
         pciDevice_ = nullptr;
         return false;
     }
+    gateAttached_ = true;
 
     msiIrqIndex_ = findMsiInterruptIndex(pciDevice_);
     IOInterruptEventSource *irq = IOInterruptEventSource::interruptEventSource(
@@ -447,7 +485,6 @@ bool UniCamIPUService::start(IOService *provider) {
         return false;
     }
 
-    gSharedIpuInstance = this;
     setName("UniCamIPUService");
     registerService();
 
@@ -461,26 +498,13 @@ bool UniCamIPUService::start(IOService *provider) {
 }
 
 void UniCamIPUService::stop(IOService *provider) {
-    if (gSharedIpuInstance == this) {
-        gSharedIpuInstance = nullptr;
-    }
-    if (commandGate_) {
-        GatedIpuRequest req = { kOpSleep, 0U, 0U, nullptr, nullptr, nullptr };
+    if (commandGate_ && gateAttached_) {
+        GatedIpuRequest req = { kOpTeardown, 0U, 0U, nullptr, nullptr, nullptr };
         commandGate_->runAction(&UniCamIPUService::gatedActionTrampoline, &req);
-    }
-
-    PMstop();
-
-    if (hal_) {
-        hal_->cleanup();
-        delete hal_;
-        hal_ = nullptr;
-    }
-
-    if (ringDesc_) {
-        ringDesc_->complete();
-        ringDesc_->release();
-        ringDesc_ = nullptr;
+    } else {
+        stopping_ = true;
+        sleepSuspended_ = true;
+        hwStreaming_ = false;
     }
 
     if (irqSource_) {
@@ -492,17 +516,21 @@ void UniCamIPUService::stop(IOService *provider) {
         irqSource_ = nullptr;
     }
 
-    if (commandGate_) {
-        if (workLoop_) {
-            workLoop_->removeEventSource(commandGate_);
-        }
-        commandGate_->release();
-        commandGate_ = nullptr;
+    if (pmInitialized_) {
+        PMstop();
+        pmInitialized_ = false;
     }
 
-    if (workLoop_) {
-        workLoop_->release();
-        workLoop_ = nullptr;
+    if (ispLock_) {
+        IOLockLock(ispLock_);
+    }
+    if (ringDesc_) {
+        ringDesc_->complete();
+        ringDesc_->release();
+        ringDesc_ = nullptr;
+    }
+    if (ispLock_) {
+        IOLockUnlock(ispLock_);
     }
 
     if (bar0Map_) {
@@ -554,7 +582,7 @@ void UniCamIPUService::interruptActionTrampoline(OSObject *owner,
 
 void UniCamIPUService::onInterrupt(int count) {
     (void)count;
-    if (!hal_ || sleepSuspended_) {
+    if (!hal_ || stopping_ || sleepSuspended_) {
         return;
     }
     bool frameReady = false;
@@ -611,7 +639,7 @@ IOReturn UniCamIPUService::waitNextFrameLocked(uint32_t timeoutMs, UniCamIpuFram
     }
 
     const uint64_t deadlineNs = currentUptimeNs() + static_cast<uint64_t>(timeoutMs) * 1000000ULL;
-    while (!sleepSuspended_ && hal_->isStreaming()) {
+    while (!stopping_ && !sleepSuspended_ && hal_->isStreaming()) {
         const uint64_t nowNs = currentUptimeNs();
         if (nowNs >= deadlineNs) {
             return kIOReturnTimeout;
@@ -625,6 +653,9 @@ IOReturn UniCamIPUService::waitNextFrameLocked(uint32_t timeoutMs, UniCamIpuFram
         wakeAbs = static_cast<AbsoluteTime>(wakeTicks);
 
         const IOReturn sleepRes = commandGate_->commandSleep(&frameWaitChannel_, wakeAbs, THREAD_ABORTSAFE);
+        if (stopping_) {
+            return kIOReturnAborted;
+        }
         if (sleepRes == THREAD_INTERRUPTED || sleepRes == THREAD_RESTART) {
             return kIOReturnAborted;
         }
@@ -635,6 +666,9 @@ IOReturn UniCamIPUService::waitNextFrameLocked(uint32_t timeoutMs, UniCamIpuFram
         }
     }
 
+    if (!hal_->isStreaming()) {
+        hwStreaming_ = false;
+    }
     return kIOReturnNotReady;
 }
 
@@ -651,6 +685,9 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
     const auto *req = static_cast<const GatedIpuRequest *>(arg0);
     if (!self || !req || !self->hal_) {
         return kIOReturnBadArgument;
+    }
+    if (req->op != kOpTeardown && self->stopping_) {
+        return kIOReturnNotReady;
     }
 
     switch (req->op) {
@@ -708,6 +745,7 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
             ret = self->hal_->startStream(
                 *static_cast<const UniCamIpuStreamConfig *>(req->inPtr),
                 static_cast<UniCamIpuStreamStatus *>(req->outPtr));
+            self->hwStreaming_ = (ret == kIOReturnSuccess);
             if (ret == kIOReturnSuccess) {
                 self->activeOwner_ = req->client;
             }
@@ -721,6 +759,7 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
             return self->hal_->requeueSlot(req->u0);
 
         case kOpStopStream: {
+            self->hwStreaming_ = false;
             const IOReturn ret = self->hal_->stopStream();
             if (self->activeOwner_ == req->client || req->client == nullptr) {
                 self->activeOwner_ = nullptr;
@@ -742,6 +781,7 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
         case kOpClientDisconnect:
             if (req->client && self->activeOwner_ == req->client) {
                 IOLog("UniCamIPU: Owner client closed while active -> stopping ISYS stream\n");
+                self->hwStreaming_ = false;
                 self->hal_->stopStream();
                 self->activeOwner_ = nullptr;
                 self->commandGate_->commandWakeup(&self->frameWaitChannel_, false);
@@ -750,6 +790,7 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
 
         case kOpSleep:
             self->sleepSuspended_ = true;
+            self->hwStreaming_ = false;
             self->captureMsiStateIfEnabled();
             self->commandGate_->commandWakeup(&self->frameWaitChannel_, false);
             return self->hal_->handleSleep();
@@ -758,6 +799,17 @@ IOReturn UniCamIPUService::gatedActionTrampoline(OSObject *owner,
             self->sleepSuspended_ = false;
             self->ensurePciD0AndBars();
             return self->hal_->handleWake();
+
+        case kOpTeardown:
+            self->stopping_ = true;
+            self->sleepSuspended_ = true;
+            self->hwStreaming_ = false;
+            if (self->irqSource_) {
+                self->irqSource_->disable();
+            }
+            self->commandGate_->commandWakeup(&self->frameWaitChannel_, false);
+            self->hal_->cleanup();
+            return kIOReturnSuccess;
 
         default:
             return kIOReturnUnsupported;
@@ -843,9 +895,11 @@ void UniCamIPUService::handleClientDisconnect(UniCamIPUUserClient *client) {
 }
 
 void UniCamIPUService::resetIsp3A() {
-    if (!ispLock_ || !softIsp_) return;
+    if (!ispLock_ || !softIsp_ || stopping_) return;
     IOLockLock(ispLock_);
-    softIsp_->reset3A();
+    if (!stopping_) {
+        softIsp_->reset3A();
+    }
     IOLockUnlock(ispLock_);
 }
 
@@ -853,9 +907,11 @@ void UniCamIPUService::generateTestPatternYuy2(uint8_t *dstYuy2,
                                                uint32_t dstWidth,
                                                uint32_t dstHeight,
                                                uint32_t frameCounter) {
-    if (!ispLock_ || !softIsp_) return;
+    if (!ispLock_ || !softIsp_ || stopping_) return;
     IOLockLock(ispLock_);
-    softIsp_->generateTestPatternYuy2(dstYuy2, dstWidth, dstHeight, frameCounter);
+    if (!stopping_) {
+        softIsp_->generateTestPatternYuy2(dstYuy2, dstWidth, dstHeight, frameCounter);
+    }
     IOLockUnlock(ispLock_);
 }
 
@@ -867,13 +923,20 @@ IOReturn UniCamIPUService::processSlotToYuy2(uint32_t slotIndex,
                                              uint32_t dstHeight,
                                              uint32_t dstCapacityBytes,
                                              UniCamIspFrameStats *outStats) {
-    if (!ispLock_ || !softIsp_ || !ringDesc_ || !dstYuy2 || slotIndex >= UNICAM_IPU_RING_SLOTS) {
+    if (!ispLock_ || !softIsp_ || !dstYuy2 || slotIndex >= UNICAM_IPU_RING_SLOTS) {
         return kIOReturnBadArgument;
+    }
+
+    IOLockLock(ispLock_);
+    if (stopping_ || !ringDesc_) {
+        IOLockUnlock(ispLock_);
+        return kIOReturnNotReady;
     }
 
     const auto *ringBase = static_cast<const uint8_t *>(ringDesc_->getBytesNoCopy());
     const auto *hdr = reinterpret_cast<const UniCamIpuRingHeader *>(ringBase);
     if (!hdr || hdr->magic != UNICAM_IPU_RING_MAGIC || hdr->slotOffsets[slotIndex] == 0U) {
+        IOLockUnlock(ispLock_);
         return kIOReturnNotReady;
     }
 
@@ -883,7 +946,6 @@ IOReturn UniCamIPUService::processSlotToYuy2(uint32_t slotIndex,
     const uint32_t pixFmt = hdr->pixelFormat;
     const uint8_t *srcSlot = ringBase + hdr->slotOffsets[slotIndex];
 
-    IOLockLock(ispLock_);
     const IOReturn ret = softIsp_->processRawToYuy2(
         srcSlot,
         srcW,

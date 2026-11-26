@@ -26,9 +26,10 @@ public:
 
     IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;
 
-    static UniCamCoreService *sharedInstance();
+    static UniCamCoreService *copySharedInstance();
     uint32_t activeBayerOrder() const { return bayerOrder_; }
     bool isSleepSuspended() const { return sleepSuspended_; }
+    bool hasSupportedSensorDriver() const { return sensorSupported_; }
 
     // Gated operations invoked by UniCamCoreUserClient and in-kernel ISP/UVC consumers
     IOReturn getInfo(UniCamBoardSensorInfo *outInfo);
@@ -66,6 +67,11 @@ private:
 
     UniCamBoardSensorInfo boardInfo_;
     uint32_t bayerOrder_;
+    bool sensorSupported_;
+    bool debugBootArg_;
+    bool pmInitialized_;
+    bool gateAttached_;
+    volatile bool stopping_;
     bool streaming_;
     volatile bool sleepSuspended_;
     UniCamCoreUserClient *activeOwner_;

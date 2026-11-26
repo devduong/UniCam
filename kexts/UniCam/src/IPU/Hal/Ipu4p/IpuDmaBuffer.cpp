@@ -140,6 +140,11 @@ bool IpuDmaBuffer::attachExisting(IOPCIDevice *pciDevice,
 }
 
 bool IpuDmaBuffer::buildPageList(IOPCIDevice *pciDevice, uint32_t dmaMode) {
+    if (pageListDesc_) {
+        pageListDesc_->release();
+        pageListDesc_ = nullptr;
+        pageAddrs_ = nullptr;
+    }
     numPages_ = static_cast<uint32_t>(byteSize_ / kPageSize);
     if (numPages_ == 0) {
         return false;
@@ -159,8 +164,16 @@ bool IpuDmaBuffer::buildPageList(IOPCIDevice *pciDevice, uint32_t dmaMode) {
     memset(pageAddrs_, 0, listBytes);
 
     bool hasIommu = false;
-    const uint32_t resolved = resolveDmaMode(pciDevice, dmaMode, &hasIommu);
+    uint32_t resolved = resolveDmaMode(pciDevice, dmaMode, &hasIommu);
     (void)hasIommu;
+    if (resolved == kUniCamIpuDmaDeviceMapper) {
+        IOMapper *devMapper = IOMapper::copyMapperForDevice(pciDevice);
+        mapper_ = devMapper;
+        if (!mapper_) {
+            IOLog("UniCamIPU: copyMapperForDevice returned null, falling back to physical DMA\n");
+            resolved = kUniCamIpuDmaPhysical;
+        }
+    }
     activeDmaMode_ = resolved;
 
     if (resolved == kUniCamIpuDmaPhysical) {
@@ -176,16 +189,6 @@ bool IpuDmaBuffer::buildPageList(IOPCIDevice *pciDevice, uint32_t dmaMode) {
             pageAddrs_[p] = static_cast<uint64_t>(pa);
         }
         return true;
-    }
-
-    if (resolved == kUniCamIpuDmaDeviceMapper) {
-        IOMapper *devMapper = IOMapper::copyMapperForDevice(pciDevice);
-        mapper_ = devMapper;
-        if (!mapper_) {
-            IOLog("UniCamIPU: copyMapperForDevice returned null, falling back to physical DMA\n");
-            activeDmaMode_ = kUniCamIpuDmaPhysical;
-            return buildPageList(pciDevice, kUniCamIpuDmaPhysical);
-        }
     }
 
     IODMACommand *cmd = IODMACommand::withSpecification(

@@ -1,17 +1,15 @@
 #include "UniCamCoreService.hpp"
 #include "Sensors/SensorRegistry.hpp"
+#include "UniCamKernelGate.h"
 
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSBoolean.h>
-#include <pexpert/pexpert.h>
 #include <string.h>
 
 #define super IOService
 OSDefineMetaClassAndStructors(UniCamCoreService, IOService)
 
 namespace {
-
-UniCamCoreService *gSharedCoreInstance = nullptr;
 
 enum {
     kPowerStateOff = 0,
@@ -37,7 +35,8 @@ enum GatedOp {
     kOpSetStream,
     kOpSetExposureGain,
     kOpClientDisconnect,
-    kOpSleepOff
+    kOpSleepOff,
+    kOpTeardown
 };
 
 struct GatedRequest {
@@ -62,8 +61,13 @@ bool UniCamCoreService::init(OSDictionary *dictionary) {
     workLoop_ = nullptr;
     commandGate_ = nullptr;
     sensorDriver_ = nullptr;
-    memset(&boardInfo_, 0, sizeof(boardInfo_));
+    boardInfo_ = {};
     bayerOrder_ = 0U;
+    sensorSupported_ = false;
+    debugBootArg_ = false;
+    pmInitialized_ = false;
+    gateAttached_ = false;
+    stopping_ = false;
     streaming_ = false;
     sleepSuspended_ = false;
     activeOwner_ = nullptr;
@@ -71,21 +75,40 @@ bool UniCamCoreService::init(OSDictionary *dictionary) {
 }
 
 void UniCamCoreService::free() {
+    if (gateAttached_ && workLoop_ && commandGate_) {
+        workLoop_->removeEventSource(commandGate_);
+        gateAttached_ = false;
+    }
+    OSSafeReleaseNULL(commandGate_);
+    OSSafeReleaseNULL(workLoop_);
     if (sensorDriver_) {
         SensorRegistry::destroy(sensorDriver_);
         sensorDriver_ = nullptr;
     }
+    OSSafeReleaseNULL(nub_);
     super::free();
 }
 
-UniCamCoreService *UniCamCoreService::sharedInstance() {
-    return gSharedCoreInstance;
+UniCamCoreService *UniCamCoreService::copySharedInstance() {
+    OSDictionary *matching = IOService::serviceMatching("UniCamCoreService");
+    if (!matching) {
+        return nullptr;
+    }
+    IOService *svc = IOService::copyMatchingService(matching);
+    matching->release();
+    if (!svc) {
+        return nullptr;
+    }
+    UniCamCoreService *core = OSDynamicCast(UniCamCoreService, svc);
+    if (!core || core->isInactive() || core->stopping_) {
+        svc->release();
+        return nullptr;
+    }
+    return core;
 }
 
 IOService *UniCamCoreService::probe(IOService *provider, SInt32 *score) {
-    uint32_t offArg = 0;
-    if (PE_parse_boot_argn("-unicamoff", &offArg, sizeof(offArg))) {
-        IOLog("UniCamCore: Disabled via -unicamoff boot-arg\n");
+    if (!unicam::isKernelSupportedForLoad("UniCamCore")) {
         return nullptr;
     }
     if (!super::probe(provider, score)) {
@@ -106,29 +129,31 @@ bool UniCamCoreService::start(IOService *provider) {
         return false;
     }
 
+    debugBootArg_ = unicam::hasBootArg("-unicamdbg");
+
     nub_ = OSDynamicCast(VoodooI2CDeviceNub, provider);
     if (!nub_) {
         IOLog("UniCamCore: Provider is not VoodooI2CDeviceNub\n");
         return false;
     }
+    nub_->retain();
 
     workLoop_ = IOWorkLoop::workLoop();
     if (!workLoop_) {
         IOLog("UniCamCore: Failed to allocate IOWorkLoop\n");
+        OSSafeReleaseNULL(nub_);
         return false;
     }
 
     commandGate_ = IOCommandGate::commandGate(this);
     if (!commandGate_ || workLoop_->addEventSource(commandGate_) != kIOReturnSuccess) {
         IOLog("UniCamCore: Failed to create/attach IOCommandGate\n");
-        if (commandGate_) {
-            commandGate_->release();
-            commandGate_ = nullptr;
-        }
-        workLoop_->release();
-        workLoop_ = nullptr;
+        OSSafeReleaseNULL(commandGate_);
+        OSSafeReleaseNULL(workLoop_);
+        OSSafeReleaseNULL(nub_);
         return false;
     }
+    gateAttached_ = true;
 
     if (!powerHal_.init(provider, &boardInfo_)) {
         IOLog("UniCamCore: AcpiMethodPowerHal init failed\n");
@@ -138,6 +163,7 @@ bool UniCamCoreService::start(IOService *provider) {
 
     i2cTransport_.setNub(nub_);
     sensorDriver_ = SensorRegistry::createForCompat(boardInfo_.sensorCompat, boardInfo_.sensorHid);
+    sensorSupported_ = (sensorDriver_ != nullptr);
     if (sensorDriver_) {
         sensorDriver_->setBusConfig(boardInfo_.csiLanes ? boardInfo_.csiLanes : 1U,
                                     boardInfo_.linkFreqHz);
@@ -151,12 +177,12 @@ bool UniCamCoreService::start(IOService *provider) {
             boardInfo_.linkFreqHz = mode.linkFreqHz;
         }
     } else {
-        boardInfo_.sensorWidth = 1280;
-        boardInfo_.sensorHeight = 800;
-        boardInfo_.sensorBpp = 10;
-        boardInfo_.expectedChipId = UNICAM_OV01A10_CHIP_ID;
+        boardInfo_.sensorWidth = 0U;
+        boardInfo_.sensorHeight = 0U;
+        boardInfo_.sensorBpp = 0U;
+        boardInfo_.expectedChipId = 0U;
         bayerOrder_ = 0U;
-        IOLog("UniCamCore: Warning - no sensor driver registered for compat='%s' hid='%s'\n",
+        IOLog("UniCamCore: Unsupported sensor compat='%s' hid='%s' (power & Virtual UVC disabled unless -unicamdbg CLI)\n",
               boardInfo_.sensorCompat, boardInfo_.sensorHid);
     }
 
@@ -175,43 +201,38 @@ bool UniCamCoreService::start(IOService *provider) {
     setProperty("unicam-link-freq-hz", boardInfo_.linkFreqHz, 64);
     setProperty("unicam-mclk-hz", boardInfo_.mclkHz, 64);
     setProperty("unicam-rotation", boardInfo_.rotation, 32);
-    setProperty("unicam-ready", true);
+    setProperty("unicam-sensor-supported", sensorSupported_);
+    setProperty("unicam-ready", sensorSupported_);
 
     PMinit();
+    pmInitialized_ = true;
     provider->joinPMtree(this);
     registerPowerDriver(this, kUniCamPowerStates, kPowerStateCount);
     makeUsable();
 
-    gSharedCoreInstance = this;
     setName("UniCamCoreService");
     registerService();
-    IOLog("UniCamCore: Started (%s / %s)\n", boardInfo_.boardId, boardInfo_.sensorCompat);
+    IOLog("UniCamCore: Started (%s / %s%s)\n",
+          boardInfo_.boardId,
+          boardInfo_.sensorCompat,
+          sensorSupported_ ? "" : " [unsupported sensor]");
     return true;
 }
 
 void UniCamCoreService::stop(IOService *provider) {
-    if (gSharedCoreInstance == this) {
-        gSharedCoreInstance = nullptr;
-    }
-    if (commandGate_) {
+    if (commandGate_ && gateAttached_) {
         GatedRequest req;
         memset(&req, 0, sizeof(req));
-        req.op = kOpSleepOff;
+        req.op = kOpTeardown;
         commandGate_->runAction(&UniCamCoreService::gatedActionTrampoline, &req);
+    } else {
+        stopping_ = true;
+        sleepSuspended_ = true;
     }
 
-    PMstop();
-
-    if (commandGate_ && workLoop_) {
-        workLoop_->removeEventSource(commandGate_);
-    }
-    if (commandGate_) {
-        commandGate_->release();
-        commandGate_ = nullptr;
-    }
-    if (workLoop_) {
-        workLoop_->release();
-        workLoop_ = nullptr;
+    if (pmInitialized_) {
+        PMstop();
+        pmInitialized_ = false;
     }
 
     powerHal_.cleanup();
@@ -220,7 +241,8 @@ void UniCamCoreService::stop(IOService *provider) {
         SensorRegistry::destroy(sensorDriver_);
         sensorDriver_ = nullptr;
     }
-    nub_ = nullptr;
+    sensorSupported_ = false;
+    OSSafeReleaseNULL(nub_);
     super::stop(provider);
 }
 
@@ -251,6 +273,9 @@ IOReturn UniCamCoreService::gatedActionTrampoline(OSObject *owner, void *arg0, v
     if (!self || !req) {
         return kIOReturnBadArgument;
     }
+    if (req->op != kOpTeardown && self->stopping_) {
+        return kIOReturnNotReady;
+    }
 
     switch (req->op) {
         case kOpGetInfo:
@@ -265,12 +290,23 @@ IOReturn UniCamCoreService::gatedActionTrampoline(OSObject *owner, void *arg0, v
             return self->probeSensorLocked(req->u0, req->b0, static_cast<UniCamProbeReport *>(req->ptr));
 
         case kOpSetPower:
+            if (req->b0 && !self->sensorDriver_ && !(req->client != nullptr && self->debugBootArg_)) {
+                IOLog("UniCamCore: Refusing power-on for unsupported sensor compat='%s'\n",
+                      self->boardInfo_.sensorCompat);
+                return kIOReturnUnsupported;
+            }
             return self->setPowerLocked(req->b0, req->b1, req->client);
 
         case kOpSetLed:
+            if (req->b0 && !self->sensorDriver_ && !(req->client != nullptr && self->debugBootArg_)) {
+                return kIOReturnUnsupported;
+            }
             return self->setPrivacyLedLocked(req->b0, req->b1, req->client);
 
         case kOpResetSensor:
+            if (!self->sensorDriver_ && !self->debugBootArg_) {
+                return kIOReturnUnsupported;
+            }
             return self->powerHal_.pulseReset(req->b0);
 
         case kOpReadReg: {
@@ -338,6 +374,13 @@ IOReturn UniCamCoreService::gatedActionTrampoline(OSObject *owner, void *arg0, v
             return kIOReturnSuccess;
 
         case kOpSleepOff:
+            self->forceIdleHardwareLocked();
+            self->activeOwner_ = nullptr;
+            return kIOReturnSuccess;
+
+        case kOpTeardown:
+            self->stopping_ = true;
+            self->sleepSuspended_ = true;
             self->forceIdleHardwareLocked();
             self->activeOwner_ = nullptr;
             return kIOReturnSuccess;

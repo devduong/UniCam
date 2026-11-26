@@ -1,10 +1,77 @@
 #include "AcpiMethodPowerHal.hpp"
+#include "UniCamKernelGate.h"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IORegistryEntry.h>
+#include <IOKit/IOService.h>
+#include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/c++/OSData.h>
+#include <libkern/c++/OSIterator.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <string.h>
+
+namespace {
+
+bool readPciIdsFromEntry(const IORegistryEntry *entry, uint16_t *outVid, uint16_t *outDid) {
+    if (!entry || !outVid || !outDid) {
+        return false;
+    }
+    OSData *vidData = OSDynamicCast(OSData, entry->getProperty("vendor-id"));
+    OSData *didData = OSDynamicCast(OSData, entry->getProperty("device-id"));
+    if (!vidData || !didData || vidData->getLength() < 2 || didData->getLength() < 2) {
+        return false;
+    }
+    const uint8_t *vp = static_cast<const uint8_t *>(vidData->getBytesNoCopy());
+    const uint8_t *dp = static_cast<const uint8_t *>(didData->getBytesNoCopy());
+    if (!vp || !dp) {
+        return false;
+    }
+    *outVid = static_cast<uint16_t>(
+        static_cast<uint16_t>(vp[0]) | (static_cast<uint16_t>(vp[1]) << 8U));
+    *outDid = static_cast<uint16_t>(
+        static_cast<uint16_t>(dp[0]) | (static_cast<uint16_t>(dp[1]) << 8U));
+    return true;
+}
+
+bool isIceLakePlatform(IOService *provider) {
+    for (IORegistryEntry *cur = provider;
+         cur != nullptr;
+         cur = cur->getParentEntry(gIOServicePlane)) {
+        uint16_t vid = 0;
+        uint16_t did = 0;
+        if (readPciIdsFromEntry(cur, &vid, &did) && vid == 0x8086U &&
+            ((did & 0xFF00U) == 0x3400U || (did & 0xFF00U) == 0x3800U)) {
+            return true;
+        }
+    }
+
+    OSDictionary *matching = IOService::serviceMatching("IOPCIDevice");
+    if (!matching) {
+        return false;
+    }
+    OSIterator *iter = IOService::getMatchingServices(matching);
+    matching->release();
+    if (!iter) {
+        return false;
+    }
+
+    bool foundIpu4p = false;
+    OSObject *obj = nullptr;
+    while ((obj = iter->getNextObject()) != nullptr) {
+        IORegistryEntry *entry = OSDynamicCast(IORegistryEntry, obj);
+        uint16_t vid = 0;
+        uint16_t did = 0;
+        if (readPciIdsFromEntry(entry, &vid, &did) && vid == 0x8086U && did == 0x8A19U) {
+            foundIpu4p = true;
+            break;
+        }
+    }
+    iter->release();
+    return foundIpu4p;
+}
+
+} // namespace
 
 AcpiMethodPowerHal::AcpiMethodPowerHal()
     : provider_(nullptr),
@@ -156,6 +223,12 @@ bool AcpiMethodPowerHal::init(IOService *provider, UniCamBoardSensorInfo *outInf
         return false;
     }
 
+    const bool iceLakeOk = isIceLakePlatform(provider);
+    if (!iceLakeOk && !unicam::hasBootArg("-unicamtest")) {
+        IOLog("UniCamCore: Host platform is not Intel Ice Lake (IPU4P); refusing UNIC0001 power HAL init for PCH MMIO safety\n");
+        return false;
+    }
+
     provider_ = provider;
 
     // Extract IOACPIPlatformDevice attached by VoodooI2CDeviceNub::attach()
@@ -206,7 +279,7 @@ bool AcpiMethodPowerHal::init(IOService *provider, UniCamBoardSensorInfo *outInf
     readUInt32Prop("unicam-rotation", &outInfo->rotation);
 
     // Fallback: if unicam-mclk-reg wasn't specified, compute Ice Lake PCH ICLK address
-    if (outInfo->mclkRegPhysAddr == 0 && outInfo->mclkSrc < 6) {
+    if (iceLakeOk && outInfo->mclkRegPhysAddr == 0 && outInfo->mclkSrc < 6) {
         outInfo->mclkRegPhysAddr = 0xFDAD8000ULL + (static_cast<uint64_t>(outInfo->mclkSrc) * 0x0CULL);
     }
 
@@ -236,7 +309,9 @@ bool AcpiMethodPowerHal::init(IOService *provider, UniCamBoardSensorInfo *outInf
         pins[i].delayUs = roleDelays[i];
     }
 
-    mmioHal_.init(pins, outInfo->mclkRegPhysAddr, outInfo->mclkHz);
+    if (iceLakeOk) {
+        mmioHal_.init(pins, outInfo->mclkRegPhysAddr, outInfo->mclkHz);
+    }
 
     char pmicType[32] = {};
     readStringProp("unicam-pmic-type", pmicType, sizeof(pmicType));

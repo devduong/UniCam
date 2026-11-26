@@ -1,6 +1,7 @@
 #ifndef UNICAM_TPS68470_POWER_HAL_HPP
 #define UNICAM_TPS68470_POWER_HAL_HPP
 
+#include <IOKit/IOLocks.h>
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOService.h>
 #include "UniCamCoreABI.h"
@@ -15,14 +16,17 @@ class UniCamPmicService : public IOService {
 
 public:
     bool init(OSDictionary *dictionary = nullptr) override;
+    void free() override;
     IOService *probe(IOService *provider, SInt32 *score) override;
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
 
-    static VoodooI2CDeviceNub *sharedNub();
+    static VoodooI2CDeviceNub *copySharedNub();
 
 private:
     VoodooI2CDeviceNub *nub_;
+    IOLock *nubLock_;
+    bool stopping_;
 };
 
 struct UniCamTps68470Config {
@@ -55,12 +59,12 @@ public:
     IOReturn pulseReset();
 
     void readDiagnostics(UniCamHardwareDiag *outDiag) const;
-    bool isAvailable() const { return resolveNub() != nullptr; }
+    bool isAvailable() const;
     bool isPowered() const { return powered_; }
     bool isLedOn() const { return ledOn_; }
 
 private:
-    VoodooI2CDeviceNub *resolveNub() const;
+    VoodooI2CDeviceNub *copyNub() const;
     IOReturn readReg8(uint8_t reg, uint8_t *outVal) const;
     IOReturn writeReg8(uint8_t reg, uint8_t val) const;
     IOReturn updateBits8(uint8_t reg, uint8_t mask, uint8_t val) const;

@@ -28,9 +28,9 @@ public:
 
     IOReturn setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice) override;
 
-    static UniCamIPUService *sharedInstance();
+    static UniCamIPUService *copySharedInstance();
     bool isSleepSuspended() const { return sleepSuspended_; }
-    bool isHardwareStreaming() const { return hal_ != nullptr && hal_->isStreaming(); }
+    bool isHardwareStreaming() const { return !stopping_ && hwStreaming_; }
 
     IOReturn getInfo(UniCamIpuHwInfo *outInfo);
     IOReturn getDiagnostics(UniCamIpuDiag *outDiag);
@@ -106,6 +106,10 @@ private:
     IOBufferMemoryDescriptor *ringDesc_;
     UniCamIPUUserClient *activeOwner_;
     uint8_t frameWaitChannel_;
+    bool pmInitialized_;
+    bool gateAttached_;
+    volatile bool stopping_;
+    volatile bool hwStreaming_;
     volatile bool sleepSuspended_;
 };
 

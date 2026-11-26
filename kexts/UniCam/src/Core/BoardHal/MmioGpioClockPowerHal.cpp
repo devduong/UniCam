@@ -5,8 +5,13 @@
 
 namespace {
 
-constexpr uint64_t kPchSidebandBase = 0xFD000000ULL;
-constexpr uint64_t kPchSidebandEnd  = 0xFE000000ULL;
+// Intel Ice Lake-LP PCH sideband regions:
+//  - GPIO Communities COM0..COM5: 0xFD690000..0xFD6EFFFF (PADCFG starts >= +0x0400)
+//  - ICLK IMGCLKOUT_x block:      0xFDAD8000..0xFDAD8060
+constexpr uint64_t kIclGpioBase = 0xFD690000ULL;
+constexpr uint64_t kIclGpioEnd  = 0xFD6F0000ULL;
+constexpr uint64_t kIclIclkBase = 0xFDAD8000ULL;
+constexpr uint64_t kIclIclkEnd  = 0xFDAD8060ULL;
 
 // Intel Ice Lake PCH GPIO PADCFG DW0 bit definitions:
 //  - Bit 0     : GPIOTxState
@@ -22,8 +27,17 @@ constexpr uint32_t kIclkControlMask  = 0xFFFFFFFCU;
 constexpr uint32_t kIclkEnableBit    = (1U << 1);
 constexpr uint32_t kIclkFreq19_2Bit  = (1U << 0);
 
-bool isValidPchMmioAddr(uint64_t addr) {
-    return (addr >= kPchSidebandBase) && (addr < kPchSidebandEnd) && ((addr & 0x3ULL) == 0);
+bool isValidIceLakeGpioAddr(uint64_t addr) {
+    return (addr >= kIclGpioBase) &&
+           (addr < kIclGpioEnd) &&
+           ((addr & 0xFFFFULL) >= 0x0400ULL) &&
+           ((addr & 0x3ULL) == 0ULL);
+}
+
+bool isValidIceLakeIclkAddr(uint64_t addr) {
+    return (addr >= kIclIclkBase) &&
+           (addr <= kIclIclkEnd) &&
+           ((addr & 0x3ULL) == 0ULL);
 }
 
 } // namespace
@@ -38,8 +52,11 @@ MmioGpioClockPowerHal::~MmioGpioClockPowerHal() {
     cleanup();
 }
 
-bool MmioGpioClockPowerHal::mapPhysicalDword(uint64_t physAddr, MappedReg *outReg) {
-    if (!isValidPchMmioAddr(physAddr)) {
+bool MmioGpioClockPowerHal::mapPhysicalDword(uint64_t physAddr, bool isIclk, MappedReg *outReg) {
+    const bool validAddr = isIclk ? isValidIceLakeIclkAddr(physAddr) : isValidIceLakeGpioAddr(physAddr);
+    if (!validAddr || !outReg) {
+        IOLog("UniCamCore: MmioHal rejecting out-of-range PCH %s MMIO 0x%llx\n",
+              isIclk ? "ICLK" : "GPIO", physAddr);
         return false;
     }
 
@@ -90,12 +107,12 @@ bool MmioGpioClockPowerHal::init(const UniCamGpioPinSpec pins[kUniCamGpioRoleCou
         pins_[i].activeHigh = pins[i].activeHigh ? 1U : 0U;
         pins_[i].delayUs = pins[i].delayUs;
         if (pins[i].dw0PhysAddr != 0) {
-            mapPhysicalDword(pins[i].dw0PhysAddr, &pins_[i]);
+            mapPhysicalDword(pins[i].dw0PhysAddr, false, &pins_[i]);
         }
     }
 
     if (mclkRegPhysAddr != 0) {
-        mapPhysicalDword(mclkRegPhysAddr, &mclkReg_);
+        mapPhysicalDword(mclkRegPhysAddr, true, &mclkReg_);
     }
 
     return true;
@@ -121,6 +138,9 @@ IOReturn MmioGpioClockPowerHal::writeGpioPin(uint32_t role, bool sensorOn) {
     const uint32_t level = sensorOn ? onLevel : (1U - onLevel);
 
     uint32_t dw0 = reg.ptr32[0];
+    if (dw0 == 0xFFFFFFFFU) {
+        return kIOReturnNotReady;
+    }
     dw0 &= kGpioDw0OutputMask;
     if (level != 0) {
         dw0 |= kGpioDw0TxStateBit;
@@ -137,6 +157,9 @@ IOReturn MmioGpioClockPowerHal::writeMclk(bool enable) {
 
     const uint32_t freqBit = (mclkHz_ == 19200000ULL) ? kIclkFreq19_2Bit : 0U;
     uint32_t val = mclkReg_.ptr32[0];
+    if (val == 0xFFFFFFFFU) {
+        return kIOReturnNotReady;
+    }
     val &= kIclkControlMask;
     val |= freqBit;
     if (enable) {

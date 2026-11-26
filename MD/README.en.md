@@ -21,6 +21,7 @@
 | :--- | :--- | :--- |
 | **macOS 26 Tahoe** *(e.g. `26.7.2`, build `25G332`)* | **Verified Working** | Compiled and tested live with `UVCAssistant` (Photo Booth + Privacy LED + Sleep/Wake). |
 | **macOS 15 Sequoia / 14 Sonoma / 13 Ventura** | **Supported via Single Build** *(needs confirmation)* | Built with `-mmacosx-version-min=13.0` (`LSMinimumSystemVersion = 13.0`). **One single `UniCam.kext`** from [**Releases**](https://github.com/devduong/UniCam/releases) works across all supported versions *(just ensure `Lilu.kext` & `VoodooI2C.kext` match your macOS version)*. |
+| **Newer / Beta macOS (`Darwin >= 26`)** | **Gated (Requires `-unicambeta`)** | Refuses to attach on untested future kernels by default to prevent `IOUSBHostFamily` ABI panics; add `-unicambeta` to `boot-args` to test. |
 | **macOS 12 Monterey and older** *(12 / 11 / 10.15)* | **Not Supported** | Older releases use legacy `VDCAssistant` and lack the `IOUSBHostFamily` / `UVCAssistant` stack of macOS 13+. |
 
 ### 1.2. Required Kexts, Tested Versions & Load Order in `EFI/OC/`
@@ -89,7 +90,17 @@ The repository is organized into **2 self-contained folders**, each with a **dou
    - **`Kernel -> Add`**: Ensure load order is **`Lilu.kext`** → **`VoodooI2C.kext`** *(+ plugins)* → **`UniCam.kext`**.
 3. **Reboot** macOS, open **Photo Booth** (or QuickTime / FaceTime), and test **Integrated Webcam HD**.
 
-*Boot troubleshooting: Add boot-arg `-unicamoff` to disable the camera kext completely, or `-unicamdbg` for verbose debug logs.*
+#### OpenCore Boot Arguments (`boot-args`) for Testing & Safety
+
+Add any of the flags below to `config.plist` → `NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82 -> boot-args` as needed:
+
+| Boot Argument | Behavior | When to Use |
+| :--- | :--- | :--- |
+| *(none — default)* | Attaches Virtual UVC and powers camera rails **only** when Ice Lake `IPU4P (8086:8a19)` + `SSDT-CAM` + a supported sensor are present on macOS 13–26; stays safely dormant otherwise. | Daily driver / normal use. |
+| **`-unicamdbg`** | Enables verbose `UniCam` kernel logs, allows diagnostic Virtual UVC fallback on `IPU4P` boards during SSDT bring-up, and unlocks manual CLI power/probe on unmapped sensors. | **Recommended when testing new IPU4P laptops (Section 3.2)** or diagnosing black screen / no capture. |
+| **`-unicamtest`** | Forces the Virtual UVC device (`Integrated Webcam HD`) to attach in color-bar test pattern mode even without `IPU4P` or `SSDT-CAM` hardware. | Isolated testing of `UVCAssistant` / app integration without camera hardware. |
+| **`-unicambeta`** | Overrides the Darwin kernel version cap so `UniCam.kext` loads on future/beta macOS releases (`Darwin >= 26`). | Testing on unreleased or newer macOS versions beyond macOS 26 Tahoe. |
+| **`-unicamoff`** | Completely disables all `UniCam` kext services in `probe()`/`start()`. | Emergency safe-boot bypass in OpenCore if troubleshooting boot issues. |
 
 ---
 
@@ -117,7 +128,7 @@ The kext and ACPI toolchain **fully support** **Intel Ice Lake `IPU4P` (`8086:8a
 > [!TIP]
 > **Want to test & confirm one of the 3.2 configurations?**
 > 1. Confirm your laptop uses **Intel IPU4P (`8086:8a19`)** (Windows Device Manager -> `PCI\VEN_8086&DEV_8A19`, or `ioreg -l | grep 8a19` in macOS).
-> 2. Follow Step 1 & Step 2 above using [`Build-UniCam.command`](../kexts/Build-UniCam.command) and [`UniCam-SSDT.command`](../acpi/UniCam-SSDT.command).
+> 2. Follow Step 1 & Step 2 above using [`Build-UniCam.command`](../kexts/Build-UniCam.command) and [`UniCam-SSDT.command`](../acpi/UniCam-SSDT.command), and add **`-unicamdbg`** to OpenCore `boot-args` *(also add **`-unicambeta`** if testing on `Darwin >= 26`)* so diagnostic logging and fallback UVC remain enabled while bringing up your board.
 > 3. If video does not appear immediately, run the commands below in Terminal (with `-unicamdbg` boot-arg enabled) and open a GitHub Issue attaching `acpi/output/pinout_decoded.json`:
 >    `ioreg -r -n UniCamBridgeService -d 4 && log show --last 5m --predicate 'eventMessage CONTAINS[c] "UniCam"'`
 

@@ -21,6 +21,7 @@
 | :--- | :--- | :--- |
 | **macOS 26 Tahoe** *(vd `26.7.2`, build `25G332`)* | **Đã kiểm chứng thực tế** | Biên dịch và chạy thực tế ổn định với `UVCAssistant` (Photo Booth + Privacy LED + Sleep/Wake). |
 | **macOS 15 Sequoia / 14 Sonoma / 13 Ventura** | **Hỗ trợ bằng cùng 1 bản build** *(cần xác nhận)* | Kext biên dịch với `-mmacosx-version-min=13.0` (`LSMinimumSystemVersion = 13.0`), dùng chung **1 bản `UniCam.kext` duy nhất** tải tại [**Releases**](https://github.com/devduong/UniCam/releases) *(chỉ cần `Lilu.kext` & `VoodooI2C.kext` khớp bản macOS của bạn)*. |
+| **macOS mới hơn / Beta (`Darwin >= 26`)** | **Khóa an toàn (cần `-unicambeta`)** | Mặc định từ chối nạp trên nhân Darwin mới hơn bản đã test để tránh panic ABI `IOUSBHostFamily`; thêm cờ `-unicambeta` vào `boot-args` nếu muốn test thử. |
 | **macOS 12 Monterey trở xuống** *(12 / 11 / 10.15)* | **Không hỗ trợ** | Hệ thống cũ dùng `VDCAssistant` và kiến trúc USB video stack khác `UVCAssistant` của macOS 13+. |
 
 ### 1.2. Các kext phụ thuộc, phiên bản & thứ tự nạp trong `EFI/OC/`
@@ -89,7 +90,17 @@ Dự án được chia gọn thành **2 thư mục tự chứa**, mỗi thư m�
    - **`Kernel -> Add`**: Bảo đảm thứ tự nạp là **`Lilu.kext`** → **`VoodooI2C.kext`** *(+ plugins)* → **`UniCam.kext`**.
 3. **Reboot** macOS, mở **Photo Booth** (hoặc QuickTime / FaceTime) và kiểm tra camera **Integrated Webcam HD**.
 
-*Gặp sự cố khi boot? Thêm boot-arg `-unicamoff` để tắt hoàn toàn kext camera, hoặc `-unicamdbg` để xem thêm log debug.*
+#### Các cờ `boot-args` OpenCore khi test & phòng ngừa sự cố
+
+Thêm các cờ cần thiết vào `config.plist` → `NVRAM -> Add -> 7C436110-AB2A-4BBB-A880-FE41995C9F82 -> boot-args`:
+
+| Cờ `boot-args` | Tác dụng | Khi nào nên thêm |
+| :--- | :--- | :--- |
+| *(không thêm — mặc định)* | Chỉ gắn Virtual UVC và cấp nguồn camera khi máy có đủ Ice Lake `IPU4P (8086:8a19)` + `SSDT-CAM` + cảm biến được hỗ trợ trên macOS 13–26; tự nằm yên nếu phần cứng không khớp. | Dùng hằng ngày ổn định. |
+| **`-unicamdbg`** | Bật log debug chi tiết, cho phép gắn Virtual UVC dự phòng (bảng màu chẩn đoán) trên máy `IPU4P` đang dò SSDT, và cho phép probe thủ công qua CLI trên cảm biến mới. | **Khuyên dùng khi test dòng máy mới ở mục 3.2** hoặc chẩn đoán lỗi đen hình. |
+| **`-unicamtest`** | Ép bật Virtual UVC giả lập (`Integrated Webcam HD` xuất bảng màu test) kể cả trên máy không có `IPU4P` hoặc chưa có `SSDT-CAM`. | Test riêng tầng `UVCAssistant` / ứng dụng gọi webcam mà không cần phần cứng thật. |
+| **`-unicambeta`** | Bỏ chốt chặn phiên bản Darwin để cho phép nạp `UniCam.kext` trên các bản macOS mới hơn macOS 26 Tahoe (`Darwin >= 26`). | Khi muốn test trên bản macOS beta/mới hơn macOS 26. |
+| **`-unicamoff`** | Vô hiệu hóa hoàn toàn mọi dịch vụ của `UniCam.kext` ngay trong `probe()`/`start()`. | Công tắc tắt khẩn cấp khi boot gặp sự cố. |
 
 ---
 
@@ -117,7 +128,7 @@ Kext và bộ công cụ ACPI **đã hỗ trợ đầy đủ** toàn bộ phần
 > [!TIP]
 > **Nếu bạn đang sở hữu một trong các máy thuộc nhóm 3.2 muốn test thử & gửi xác nhận:**
 > 1. Kiểm tra nhanh máy có chip **Intel IPU4P (`8086:8a19`)** không (xem Device Manager trên Windows -> `PCI\VEN_8086&DEV_8A19`, hoặc `ioreg -l | grep 8a19` trên macOS).
-> 2. Làm theo Bước 1 & Bước 2 ở trên (dùng [`Build-UniCam.command`](../kexts/Build-UniCam.command) và [`UniCam-SSDT.command`](../acpi/UniCam-SSDT.command)).
+> 2. Làm theo Bước 1 & Bước 2 ở trên (dùng [`Build-UniCam.command`](../kexts/Build-UniCam.command) và [`UniCam-SSDT.command`](../acpi/UniCam-SSDT.command)), đồng thời thêm **`-unicamdbg`** vào OpenCore `boot-args` *(thêm cả **`-unicambeta`** nếu đang test trên `Darwin >= 26`)* để bật log chẩn đoán và giữ chế độ UVC dự phòng khi cấu hình máy mới.
 > 3. Nếu webcam chưa lên hình ngay, mở Terminal chạy 2 lệnh sau (khi đã bật boot-arg `-unicamdbg`) rồi mở GitHub Issue đính kèm file `acpi/output/pinout_decoded.json`:
 >    `ioreg -r -n UniCamBridgeService -d 4 && log show --last 5m --predicate 'eventMessage CONTAINS[c] "UniCam"'`
 

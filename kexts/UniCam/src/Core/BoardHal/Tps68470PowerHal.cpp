@@ -1,12 +1,11 @@
 #include "Tps68470PowerHal.hpp"
+#include "UniCamKernelGate.h"
 
 #include <IOKit/IOLib.h>
-#include <pexpert/pexpert.h>
 #include <string.h>
 
 namespace {
 
-UniCamPmicService *gSharedPmicInstance = nullptr;
 constexpr uint32_t kMaxI2CRetries = 3U;
 
 // TI TPS68470 register map (include/linux/mfd/tps68470.h)
@@ -66,12 +65,26 @@ bool UniCamPmicService::init(OSDictionary *dictionary) {
         return false;
     }
     nub_ = nullptr;
+    nubLock_ = nullptr;
+    stopping_ = false;
     return true;
 }
 
+void UniCamPmicService::free() {
+    if (nubLock_) {
+        IOLockLock(nubLock_);
+        OSSafeReleaseNULL(nub_);
+        IOLockUnlock(nubLock_);
+        IOLockFree(nubLock_);
+        nubLock_ = nullptr;
+    } else {
+        OSSafeReleaseNULL(nub_);
+    }
+    super::free();
+}
+
 IOService *UniCamPmicService::probe(IOService *provider, SInt32 *score) {
-    uint32_t offArg = 0;
-    if (PE_parse_boot_argn("-unicamoff", &offArg, sizeof(offArg))) {
+    if (!unicam::isKernelSupportedForLoad("UniCamPmic")) {
         return nullptr;
     }
     if (!super::probe(provider, score)) {
@@ -91,11 +104,18 @@ bool UniCamPmicService::start(IOService *provider) {
     if (!super::start(provider)) {
         return false;
     }
-    nub_ = OSDynamicCast(VoodooI2CDeviceNub, provider);
-    if (!nub_) {
+    nubLock_ = IOLockAlloc();
+    if (!nubLock_) {
         return false;
     }
-    gSharedPmicInstance = this;
+    nub_ = OSDynamicCast(VoodooI2CDeviceNub, provider);
+    if (!nub_) {
+        IOLockFree(nubLock_);
+        nubLock_ = nullptr;
+        return false;
+    }
+    nub_->retain();
+    stopping_ = false;
     setName("UniCamPmicService");
     setProperty("unicam-pmic", "tps68470");
     registerService();
@@ -104,15 +124,44 @@ bool UniCamPmicService::start(IOService *provider) {
 }
 
 void UniCamPmicService::stop(IOService *provider) {
-    if (gSharedPmicInstance == this) {
-        gSharedPmicInstance = nullptr;
+    if (nubLock_) {
+        IOLockLock(nubLock_);
+        stopping_ = true;
+        OSSafeReleaseNULL(nub_);
+        IOLockUnlock(nubLock_);
+    } else {
+        stopping_ = true;
+        OSSafeReleaseNULL(nub_);
     }
-    nub_ = nullptr;
     super::stop(provider);
 }
 
-VoodooI2CDeviceNub *UniCamPmicService::sharedNub() {
-    return gSharedPmicInstance ? gSharedPmicInstance->nub_ : nullptr;
+VoodooI2CDeviceNub *UniCamPmicService::copySharedNub() {
+    OSDictionary *matching = IOService::serviceMatching("UniCamPmicService");
+    if (!matching) {
+        return nullptr;
+    }
+    IOService *svc = IOService::copyMatchingService(matching);
+    matching->release();
+    if (!svc) {
+        return nullptr;
+    }
+    UniCamPmicService *pmic = OSDynamicCast(UniCamPmicService, svc);
+    if (!pmic || pmic->isInactive()) {
+        svc->release();
+        return nullptr;
+    }
+    VoodooI2CDeviceNub *retNub = nullptr;
+    if (pmic->nubLock_) {
+        IOLockLock(pmic->nubLock_);
+        if (!pmic->stopping_ && pmic->nub_ != nullptr) {
+            pmic->nub_->retain();
+            retNub = pmic->nub_;
+        }
+        IOLockUnlock(pmic->nubLock_);
+    }
+    pmic->release();
+    return retNub;
 }
 
 // ============================================================================
@@ -157,13 +206,25 @@ void Tps68470PowerHal::cleanup() {
     ledOn_ = false;
 }
 
-VoodooI2CDeviceNub *Tps68470PowerHal::resolveNub() const {
-    return UniCamPmicService::sharedNub();
+VoodooI2CDeviceNub *Tps68470PowerHal::copyNub() const {
+    return UniCamPmicService::copySharedNub();
+}
+
+bool Tps68470PowerHal::isAvailable() const {
+    VoodooI2CDeviceNub *nub = copyNub();
+    if (!nub) {
+        return false;
+    }
+    nub->release();
+    return true;
 }
 
 IOReturn Tps68470PowerHal::readReg8(uint8_t reg, uint8_t *outVal) const {
-    VoodooI2CDeviceNub *nub = resolveNub();
-    if (!nub || !outVal) {
+    if (!outVal) {
+        return kIOReturnBadArgument;
+    }
+    VoodooI2CDeviceNub *nub = copyNub();
+    if (!nub) {
         return kIOReturnNotReady;
     }
     IOReturn ret = kIOReturnError;
@@ -173,17 +234,18 @@ IOReturn Tps68470PowerHal::readReg8(uint8_t reg, uint8_t *outVal) const {
         ret = nub->writeReadI2C(&r, 1, &v, 1);
         if (ret == kIOReturnSuccess) {
             *outVal = v;
-            return kIOReturnSuccess;
+            break;
         }
         if (attempt + 1U < kMaxI2CRetries) {
             IOSleep(1);
         }
     }
+    nub->release();
     return ret;
 }
 
 IOReturn Tps68470PowerHal::writeReg8(uint8_t reg, uint8_t val) const {
-    VoodooI2CDeviceNub *nub = resolveNub();
+    VoodooI2CDeviceNub *nub = copyNub();
     if (!nub) {
         return kIOReturnNotReady;
     }
@@ -192,12 +254,13 @@ IOReturn Tps68470PowerHal::writeReg8(uint8_t reg, uint8_t val) const {
         uint8_t buf[2] = { reg, val };
         ret = nub->writeI2C(buf, 2);
         if (ret == kIOReturnSuccess) {
-            return kIOReturnSuccess;
+            break;
         }
         if (attempt + 1U < kMaxI2CRetries) {
             IOSleep(1);
         }
     }
+    nub->release();
     return ret;
 }
 
@@ -271,13 +334,13 @@ IOReturn Tps68470PowerHal::programPllAndClock(bool enable) const {
 }
 
 IOReturn Tps68470PowerHal::setPower(bool enable) {
-    if (!resolveNub()) {
+    if (!isAvailable()) {
         // Give VoodooI2C briefly in case UNIC0002 publishes slightly after UNIC0001
-        for (int i = 0; i < 20 && !resolveNub(); ++i) {
+        for (int i = 0; i < 20 && !isAvailable(); ++i) {
             IOSleep(25);
         }
     }
-    if (!resolveNub()) {
+    if (!isAvailable()) {
         IOLog("UniCamCore: TPS68470 PMIC nub (UNIC0002) not attached\n");
         return kIOReturnNotReady;
     }
